@@ -3,3 +3,6 @@ vector_store/
 
 # Ignore processed data
 processed_data/
+# Ignore ChromaDB persistent vector store files and directories
+vector_store/
+*.sqlite3
