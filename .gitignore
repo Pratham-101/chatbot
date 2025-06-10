@@ -1,0 +1,5 @@
+# Ignore the vector store
+vector_store/
+
+# Ignore processed data
+processed_data/
