@@ -1,0 +1,16 @@
+fastapi
+uvicorn
+python-multipart
+ollama
+chromadb==0.4.21
+sentence-transformers
+pypdf
+pdfplumber
+python-dotenv
+streamlit
+numpy==1.26.4
+pytest
+pytest-asyncio
+fuzzywuzzy
+python-Levenshtein
+spacy
