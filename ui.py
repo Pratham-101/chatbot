@@ -1,11 +1,15 @@
 import streamlit as st
 import requests
+import os
 
 st.title("Mutual Fund Factsheet Chatbot")
 
 # Initialize session state
 if "messages" not in st.session_state:
     st.session_state.messages = []
+
+# Get backend API URL from environment variable or default to localhost
+BACKEND_API_URL = os.getenv("BACKEND_API_URL", "http://localhost:30080/ask")
 
 # Display chat messages
 for message in st.session_state.messages:
@@ -23,13 +27,17 @@ if prompt := st.chat_input("Ask a question about mutual funds"):
     
     # Get response from API
     try:
+        print(f"[UI] Sending question to backend: {prompt}")
         response = requests.post(
-            "http://localhost:8000/ask",
+            BACKEND_API_URL,
             json={"question": prompt}
-        ).json()
-        
-        answer = response.get("answer", "Sorry, I couldn't process your question.")
-    except:
+        )
+        print(f"[UI] Received response status: {response.status_code}")
+        response_json = response.json()
+        print(f"[UI] Response JSON: {response_json}")
+        answer = response_json.get("answer", "Sorry, I couldn't process your question.")
+    except Exception as e:
+        print(f"[UI] Exception during API call: {e}")
         answer = "Sorry, the service is currently unavailable."
     
     # Display assistant response

@@ -60,29 +60,37 @@ class Retriever:
         import os
         import re
 
-        # Load known fund names from processed_data JSON (cache in class variable)
+        # Cache nlp model to avoid reloading every call
+        if not hasattr(Retriever, "_nlp"):
+            Retriever._nlp = spacy.load("en_core_web_sm")
+
+        # Load known fund names from all JSON files in processed_data (cache in class variable)
         if not hasattr(Retriever, "_known_fund_names"):
             try:
-                data_path = os.path.join("processed_data", "all-sbimf-schemes-factsheet-april-2025.json")
-                with open(data_path, "r", encoding="utf-8") as f:
-                    data = json.load(f)
-                text_data = " ".join(item.get("text", "") for item in data)
-                # Extract fund names by regex: words ending with Fund, Scheme, etc.
-                pattern = r"([A-Za-z0-9& ,.-]+?(?:Fund|Scheme|Tax Saver|ELSS))"
-                matches = re.findall(pattern, text_data, re.IGNORECASE)
-                # Deduplicate and store
-                fund_names = list(set(match.strip() for match in matches))
-                Retriever._known_fund_names = fund_names
+                fund_names = set()
+                processed_data_dir = "processed_data"
+                for filename in os.listdir(processed_data_dir):
+                    if filename.endswith(".json"):
+                        file_path = os.path.join(processed_data_dir, filename)
+                        with open(file_path, "r", encoding="utf-8") as f:
+                            data = json.load(f)
+                        text_data = " ".join(item.get("text", "") for item in data)
+                        # Extract fund names by regex: words ending with Fund, Scheme, etc.
+                        pattern = r"([A-Za-z0-9& ,.-]+?(?:Fund|Scheme|Tax Saver|ELSS))"
+                        matches = re.findall(pattern, text_data, re.IGNORECASE)
+                        for match in matches:
+                            fund_names.add(match.strip())
+                Retriever._known_fund_names = list(fund_names)
             except Exception as e:
                 print(f"Error loading known fund names: {e}")
                 Retriever._known_fund_names = []
         else:
             fund_names = Retriever._known_fund_names
 
-        # Extract candidate fund names from query using spaCy NER and noun chunks
+        # Extract candidate fund names from query using cached spaCy NER and noun chunks
         candidates = set()
 
-        nlp = spacy.load("en_core_web_sm")
+        nlp = Retriever._nlp
         doc = nlp(query)
 
         # Use NER to find ORG or PRODUCT entities as fund names
@@ -125,7 +133,8 @@ class Retriever:
 
         context_chunks = self.get_relevant_context(query)
         # Regex pattern to find fund manager info in context chunks
-        manager_pattern = re.compile(r"(?:fund manager|is managed by|managed by|manager is|has|managed by Mr\.\s*|managed by Ms\.\s*|managed by Mrs\.\s*)\s*([A-Z][a-zA-Z\s\.]+)", re.IGNORECASE)
+        manager_pattern = re.compile(r"Fund Manager\s*[:\-]?\s*([A-Z][a-zA-Z\s\.\-]+)", re.IGNORECASE)
+        fallback_pattern = re.compile(r"(?:fund manager|is managed by|managed by|manager is|has|managed by Mr\.?|managed by Ms\.?|managed by Mrs\.?)\s*([A-Z][a-zA-Z\s\.\-]+)", re.IGNORECASE)
 
         for chunk in context_chunks:
             print(f"[Debug] fund_name: {fund_name.lower()}")
@@ -136,8 +145,27 @@ class Retriever:
             if condition_result:
                 print(f"[Debug] Checking chunk: {chunk}")
                 match = manager_pattern.search(chunk)
+                if not match:
+                    match = fallback_pattern.search(chunk)
                 if match:
                     print(f"[Debug] Regex match found: {match.group(0)}")
                     manager_name = match.group(1).strip()
                     return f"The fund manager for {fund_name} is {manager_name}."
+        # If no match found, try fuzzy matching on chunks
+        from fuzzywuzzy import process
+        best_match = None
+        best_score = 0
+        for chunk in context_chunks:
+            match = process.extractOne(fund_name, [chunk])
+            if match and match[1] > 70:
+                best_match = chunk
+                best_score = match[1]
+                # Try regex on best match chunk
+                match_regex = manager_pattern.search(best_match)
+                if not match_regex:
+                    match_regex = fallback_pattern.search(best_match)
+                if match_regex:
+                    manager_name = match_regex.group(1).strip()
+                    return f"The fund manager for {fund_name} is {manager_name}."
+        print(f"[Debug] Fund manager info not found in any chunk for {fund_name}")
         return f"Fund manager information for {fund_name} not found in the factsheet."

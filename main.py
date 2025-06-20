@@ -3,6 +3,13 @@ import json
 import traceback
 from ingestion.pdf_processor import PDFProcessor
 from ingestion.vector_store import VectorStore
+from fastapi import FastAPI
+
+app = FastAPI()
+
+@app.get("/health")
+def health_check():
+    return {"status": "ok"}
 
 def ingest_data():
     print("Starting data ingestion...")
