@@ -14,3 +14,4 @@ pytest-asyncio
 fuzzywuzzy
 python-Levenshtein
 spacy
+textblob

@@ -1,0 +1,49 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mutual-fund-chatbot-ui
+  labels:
+    app: mutual-fund-chatbot-ui
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: mutual-fund-chatbot-ui
+  template:
+    metadata:
+      labels:
+        app: mutual-fund-chatbot-ui
+    spec:
+      containers:
+      - name: chatbot-ui
+        image: pratham0111/mutual-fund-chatbot-ui:latest  # make sure this is the pushed image
+        ports:
+        - containerPort: 8501
+        resources:
+          limits:
+            memory: "256Mi"
+            cpu: "250m"
+          requests:
+            memory: "128Mi"
+            cpu: "100m"
+        env:
+        - name: PYTHONUNBUFFERED
+          value: "1"
+        - name: BACKEND_API_URL
+          value: "http://mutual-fund-chatbot-service:80/ask"
+
+---
+
+apiVersion: v1
+kind: Service
+metadata:
+  name: mutual-fund-chatbot-ui-service
+spec:
+  selector:
+    app: mutual-fund-chatbot-ui
+  ports:
+    - protocol: TCP
+      port: 80
+      targetPort: 8501
+      nodePort: 30081  # accessible via localhost:30081
+  type: NodePort

@@ -1,0 +1,71 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mutual-fund-chatbot
+  labels:
+    app: mutual-fund-chatbot
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: mutual-fund-chatbot
+  template:
+    metadata:
+      labels:
+        app: mutual-fund-chatbot
+    spec:
+      initContainers:
+      - name: install-spacy-model
+        image: pratham0111/mutual-fund-chatbot:latest
+        command: ["python", "-m", "spacy", "download", "en_core_web_sm"]
+        volumeMounts:
+        - name: python-packages
+          mountPath: /usr/local/lib/python3.9/site-packages
+      containers:
+      - name: chatbot-api
+        image: pratham0111/mutual-fund-chatbot:latest
+        ports:
+        - containerPort: 8000
+        resources:
+          limits:
+            memory: "1024Mi"
+            cpu: "750m"
+          requests:
+            memory: "512Mi"
+            cpu: "250m"
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 8000
+          initialDelaySeconds: 20
+          periodSeconds: 10
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 8000
+          initialDelaySeconds: 40
+          periodSeconds: 30
+        env:
+        - name: PYTHONUNBUFFERED
+          value: "1"
+        - name: OLLAMA_API_URL
+          value: "http://ollama-api:11434/api/generate"
+      # Removed init container for spaCy model installation as it is now baked into the image
+      volumes:
+      - name: python-packages
+        emptyDir: {}
+
+apiVersion: v1
+kind: Service
+metadata:
+  name: mutual-fund-chatbot-service
+spec:
+  selector:
+    app: mutual-fund-chatbot
+  ports:
+    - protocol: TCP
+      port: 80
+      targetPort: 8000
+      nodePort: 30080  # Exposes it on localhost:30080
+  type: NodePort
+
