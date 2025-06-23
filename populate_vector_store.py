@@ -2,7 +2,7 @@ import sys
 import os
 import json
 import shutil
-from ingestion.pdf_processor import process_directory # Assuming this function exists to process PDFs.
+from ingestion.pdf_processor import PDFProcessor # Import the class
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
 from ingestion.vector_store import VectorStore
@@ -22,13 +22,12 @@ os.makedirs(PROCESSED_DATA_DIR)
 
 print(f"Calling PDF processor to populate '{PROCESSED_DATA_DIR}'...")
 try:
-    # This calls your existing PDF processing logic.
-    # We assume it takes a source and destination directory.
-    process_directory(PDF_SOURCE_DIR, PROCESSED_DATA_DIR)
+    # Create an instance of the processor and call the method
+    processor = PDFProcessor()
+    processor.process_directory(PDF_SOURCE_DIR, PROCESSED_DATA_DIR)
     print("PDF processing was successful.")
 except Exception as e:
     print(f"PDF processing failed: {e}")
-    print("Please ensure 'ingestion/pdf_processor.py' has a function 'process_directory(source, destination)'.")
     exit(1) # Stop the build if this critical step fails
 
 print("\n--- PDF Processing Complete. Now Populating Vector Store. ---")
