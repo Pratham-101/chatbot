@@ -20,6 +20,12 @@ RUN pip install --upgrade pip && \
     python -m spacy download en_core_web_sm && \
     python -c "from sentence_transformers import SentenceTransformer; SentenceTransformer('all-MiniLM-L6-v2')"
 
+# Run the data ingestion process to create the vector store
+COPY ./ingestion /app/ingestion
+COPY ./data /app/data
+COPY ./populate_vector_store.py /app/
+RUN python populate_vector_store.py
+
 # Stage 2: Final production image
 FROM python:3.11-slim
 
@@ -43,8 +49,7 @@ COPY --from=builder /app/.cache /app/.cache
 # Copy application code and the pre-built vector store
 COPY ./main.py /app/main.py
 COPY ./chatbot /app/chatbot
-COPY ./ingestion /app/ingestion
-COPY ./vector_store /app/vector_store
+COPY --from=builder /app/vector_store /app/vector_store
 
 # Ensure the app user owns the files
 RUN chown -R app:app /app
