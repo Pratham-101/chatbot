@@ -17,24 +17,31 @@ class PDFProcessor:
         self.embedding_model = SentenceTransformer('all-MiniLM-L6-v2')
 
     def extract_text_from_pdf(self, pdf_path: str) -> str:
-        """Extract all text from a PDF."""
+        """Extract all text from a PDF with enhanced error handling."""
+        print(f"  - Starting text extraction from: {os.path.basename(pdf_path)}")
         text = ""
         try:
             with pdfplumber.open(pdf_path) as pdf:
-                for page in pdf.pages:
-                    page_text = page.extract_text(x_tolerance=2)
-                    if page_text:
-                        text += page_text + "\n\n"  # Add space between pages
+                for i, page in enumerate(pdf.pages):
+                    try:
+                        page_text = page.extract_text(x_tolerance=2)
+                        if page_text:
+                            text += page_text + "\n\n"
+                    except Exception as e:
+                        print(f"    - Warning: Could not process page {i+1} in {os.path.basename(pdf_path)}. Error: {e}")
+                        continue # Skip to the next page
         except Exception as e:
-            print(f"pdfplumber failed for {pdf_path}, falling back. Error: {e}")
-        
-        if not text.strip():
+            print(f"  - Critical Error: pdfplumber failed for {os.path.basename(pdf_path)}. Error: {e}")
+            # Fallback to pypdf if pdfplumber fails entirely
             try:
+                print("    - Trying fallback with pypdf...")
                 reader = PdfReader(pdf_path)
                 for page in reader.pages:
                     text += page.extract_text() + "\n\n"
-            except Exception as e:
-                print(f"pypdf failed for {pdf_path}: {e}")
+            except Exception as e_fallback:
+                print(f"    - Fallback with pypdf also failed for {os.path.basename(pdf_path)}. Error: {e_fallback}")
+        
+        print(f"  - Finished text extraction from: {os.path.basename(pdf_path)}")
         return text
 
     def process_pdf(self, pdf_path: str) -> List[Dict[str, Any]]:
@@ -125,14 +132,21 @@ class PDFProcessor:
             os.makedirs(output_dir)
             
         all_chunks = []
-        for filename in os.listdir(input_dir):
-            if filename.lower().endswith('.pdf'):
-                pdf_path = os.path.join(input_dir, filename)
+        pdf_files = [f for f in os.listdir(input_dir) if f.lower().endswith('.pdf')]
+        print(f"Found {len(pdf_files)} PDF(s) to process in '{input_dir}'.")
+
+        for filename in pdf_files:
+            print(f"--- Processing file: {filename} ---")
+            pdf_path = os.path.join(input_dir, filename)
+            try:
                 chunks = self.process_pdf(pdf_path)
                 # Add the source filename to each chunk for traceability
                 for chunk in chunks:
                     chunk['source_file'] = filename
                 all_chunks.extend(chunks)
+            except Exception as e:
+                print(f"--- Failed to process {filename}. Skipping. Error: {e} ---")
+                continue # Move to the next file
                 
         output_file = os.path.join(output_dir, "processed_chunks.json")
         with open(output_file, 'w', encoding='utf-8') as f:
