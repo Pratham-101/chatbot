@@ -62,7 +62,7 @@ RUN chown -R app:app /app
 USER app
 
 # Expose the port the app runs on
-EXPOSE 8000
+EXPOSE 8080
 
 # Command to run the download script before starting the API server
-CMD ["sh", "-c", "python download_vector_store.py && uvicorn main:app --host 0.0.0.0 --port 8000"]
+CMD ["sh", "-c", "python download_vector_store.py && uvicorn main:app --host 0.0.0.0 --port $PORT"]
