@@ -1,3 +1,4 @@
+# Force clean build - 2025-06-23
 # Stage 1: Build stage with dependencies
 FROM python:3.11-slim AS builder
 
