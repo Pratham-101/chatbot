@@ -20,11 +20,14 @@ RUN pip install --upgrade pip && \
     python -m spacy download en_core_web_sm && \
     python -c "from sentence_transformers import SentenceTransformer; SentenceTransformer('all-MiniLM-L6-v2')"
 
+# Install google-cloud-storage
+RUN pip install --no-cache-dir google-cloud-storage
+
 # Run the data ingestion process to create the vector store
-COPY ./ingestion /app/ingestion
-COPY ./data /app/data
-COPY ./populate_vector_store.py /app/
-RUN python populate_vector_store.py
+# COPY ./ingestion /app/ingestion
+# COPY ./data /app/data
+# COPY ./populate_vector_store.py /app/
+# RUN python populate_vector_store.py
 
 # Stage 2: Final production image
 FROM python:3.11-slim
@@ -46,10 +49,16 @@ COPY --from=builder /usr/local/lib/python3.11/site-packages /usr/local/lib/pytho
 # Copy pre-downloaded models
 COPY --from=builder /app/.cache /app/.cache
 
-# Copy application code and the pre-built vector store
+# Copy application code
 COPY ./main.py /app/main.py
 COPY ./chatbot /app/chatbot
-COPY --from=builder /app/vector_store /app/vector_store
+COPY download_vector_store.py /app/download_vector_store.py
+
+# Copy the service account key into the image
+COPY infra-vertex-463806-g3-f3341a848a30.json /app/service_account.json
+
+# Set the environment variable so the GCS client uses this key
+ENV GOOGLE_APPLICATION_CREDENTIALS=/app/service_account.json
 
 # Ensure the app user owns the files
 RUN chown -R app:app /app
@@ -60,5 +69,5 @@ USER app
 # Expose the port the app runs on
 EXPOSE 8000
 
-# Command to run the API server
-CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]
+# Command to run the download script before starting the API server
+CMD ["sh", "-c", "python download_vector_store.py && uvicorn main:app --host 0.0.0.0 --port 8000"]
