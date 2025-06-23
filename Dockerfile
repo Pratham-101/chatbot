@@ -54,12 +54,6 @@ COPY ./main.py /app/main.py
 COPY ./chatbot /app/chatbot
 COPY download_vector_store.py /app/download_vector_store.py
 
-# Copy the service account key into the image
-COPY infra-vertex-463806-g3-f3341a848a30.json /app/service_account.json
-
-# Set the environment variable so the GCS client uses this key
-ENV GOOGLE_APPLICATION_CREDENTIALS=/app/service_account.json
-
 # Ensure the app user owns the files
 RUN chown -R app:app /app
 
