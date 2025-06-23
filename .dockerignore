@@ -5,28 +5,45 @@
 # Virtual environment
 venv
 .venv
+ENV
+env/
 
 # Python cache
-__pycache__
+__pycache__/
 *.pyc
 *.pyo
 *.pyd
 
 # Build artifacts
-.pytest_cache
+.pytest_cache/
 build/
 dist/
-*.egg-info
+*.egg-info/
 
-# Local data and indexes (the final index will be copied explicitly)
+# Local data and indexes
+vector_store/
 processed_data/
+processed_data_new/
+processed_structured_data/
 faiss_index.bin.old
 *.log
 conversation_log.json
+*.db
+*.sqlite3
 
 # IDE/Editor files
 .idea/
 .vscode/
 
-# New additions
-vector_store/ 
+# OS files
+.DS_Store
+Thumbs.db
+
+# Service account and secrets
+*.json
+infra-vertex-463806-g3-f3341a848a30.json
+
+# Misc
+*.zip
+*.tar
+*.tar.gz 
