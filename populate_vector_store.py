@@ -24,7 +24,15 @@ print(f"Calling PDF processor to populate '{PROCESSED_DATA_DIR}'...")
 try:
     # Create an instance of the processor and call the method
     processor = PDFProcessor()
-    processor.process_directory(PDF_SOURCE_DIR, PROCESSED_DATA_DIR)
+    
+    # --- New: Select only a subset of files for faster builds ---
+    files_to_process = [
+        "factsheet1.pdf",
+        "factsheet2.pdf"
+    ]
+    # ---
+    
+    processor.process_directory(PDF_SOURCE_DIR, PROCESSED_DATA_DIR, file_list=files_to_process)
     print("PDF processing was successful.")
 except Exception as e:
     print(f"PDF processing failed: {e}")
