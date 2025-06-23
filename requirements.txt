@@ -20,3 +20,4 @@ langchain-community
 faiss-cpu
 duckduckgo-search
 groq
+google-cloud-storage
