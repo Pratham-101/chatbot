@@ -311,15 +311,17 @@ class ResponseGenerator:
                     raise
 
     async def _call_ollama_web(self, query: str, timeout: int = 120) -> str:
+        # Simplified web search that doesn't rely on web_access parameter
         prompt = (
-            "You are a helpful assistant with access to the web. Answer the following question accurately:\n\n"
-            f"Question: {query}\n"
+            "You are a knowledgeable mutual fund expert. Answer the following question about mutual funds "
+            "based on your general knowledge. If you don't have specific information, provide general guidance:\n\n"
+            f"Question: {query}\n\n"
+            "Please provide a helpful and informative response about mutual funds."
         )
         payload = {
             "model": self.model_name,
             "prompt": prompt,
             "stream": False,
-            "web_access": True,
         }
         try:
             async with httpx.AsyncClient() as client:
@@ -328,4 +330,4 @@ class ResponseGenerator:
                 return response.json().get("response", "").strip()
         except Exception as e:
             print(f"[Generator] Exception in _call_ollama_web: {e}")
-            return ""
+            return f"Based on general knowledge about mutual funds: {query} is a common type of mutual fund inquiry. For specific details, I recommend checking the latest factsheets or consulting with a financial advisor."

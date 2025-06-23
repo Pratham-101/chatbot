@@ -24,34 +24,84 @@ class VectorStore:
 
     def add_documents(self, documents: List[Dict]):
         """Add processed documents to the vector store"""
-        ids = [str(hash(doc["text"])) for doc in documents]
-        embeddings = [doc["embedding"] for doc in documents]
-        texts = [doc["text"] for doc in documents]
-        metadatas = [{"source": doc.get("source", "unknown")} for doc in documents]
+        # Use provided IDs if available, otherwise generate unique ones
+        ids = []
+        embeddings = []
+        texts = []
+        metadatas = []
+        
+        for i, doc in enumerate(documents):
+            # Use provided ID or generate a unique one
+            if 'id' in doc:
+                doc_id = str(doc['id'])
+            else:
+                doc_id = f"doc_{i}_{hash(doc['text']) % 1000000}"
+            
+            ids.append(doc_id)
+            embeddings.append(doc["embedding"])
+            texts.append(doc["text"])
+            
+            # Enhanced metadata
+            metadata = {
+                "source": doc.get("source", "unknown"),
+                "fund_name": doc.get("fund_name", ""),
+                "chunk_type": doc.get("chunk_type", "fund_info")
+            }
+            metadatas.append(metadata)
 
-        self.collection.add(
-            ids=ids,
-            embeddings=embeddings,
-            documents=texts,
-            metadatas=metadatas
-        )
+        # Split into batches of 5000 (below the limit of 5461)
+        batch_size = 5000
+        for i in range(0, len(ids), batch_size):
+            batch_ids = ids[i:i + batch_size]
+            batch_embeddings = embeddings[i:i + batch_size]
+            batch_texts = texts[i:i + batch_size]
+            batch_metadatas = metadatas[i:i + batch_size]
+            
+            print(f"Adding batch {i//batch_size + 1}/{(len(ids) + batch_size - 1)//batch_size} ({len(batch_ids)} documents)")
+            
+            self.collection.add(
+                ids=batch_ids,
+                embeddings=batch_embeddings,
+                documents=batch_texts,
+                metadatas=batch_metadatas
+            )
 
-    def query(self, query_embedding: List[float], k: int = 5) -> List[Dict]:
-        """Query the vector store for similar documents"""
+    def count_documents(self) -> int:
+        """Return the total number of documents in the vector store"""
+        return self.collection.count()
+
+    def query(self, query_embedding: List[float], k: int = 5, score_threshold: float = 0.0) -> List[Dict]:
+        """Query the vector store for similar documents
+        
+        Args:
+            query_embedding: The embedding vector to query with
+            k: Number of results to return
+            score_threshold: Minimum similarity score (0-1) for results
+            
+        Returns:
+            List of dicts with text, metadata, distance and score
+        """
         results = self.collection.query(
             query_embeddings=[query_embedding],
             n_results=k
         )
 
+        # Convert distances to similarity scores (1 - normalized distance)
+        max_dist = max(results["distances"][0]) if results["distances"][0] else 1
+        scores = [1 - (dist/max_dist) for dist in results["distances"][0]]
+
         return [
             {
                 "text": doc,
                 "metadata": meta,
-                "distance": dist
+                "distance": dist,
+                "score": score
             }
-            for doc, meta, dist in zip(
+            for doc, meta, dist, score in zip(
                 results["documents"][0],
                 results["metadatas"][0],
-                results["distances"][0]
+                results["distances"][0],
+                scores
             )
+            if score >= score_threshold  # Filter by score threshold
         ]

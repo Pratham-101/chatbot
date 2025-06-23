@@ -1,0 +1,29 @@
+# Git
+.git
+.gitignore
+
+# Virtual environment
+venv
+.venv
+
+# Python cache
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+
+# Build artifacts
+.pytest_cache
+build/
+dist/
+*.egg-info
+
+# Local data and indexes (the final index will be copied explicitly)
+processed_data/
+faiss_index.bin.old
+*.log
+conversation_log.json
+
+# IDE/Editor files
+.idea/
+.vscode/ 

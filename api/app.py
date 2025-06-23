@@ -83,13 +83,13 @@ async def ask_question(request: Request):
             query_queue.append({"question": question, "future": future})
 
         try:
-            answer = await asyncio.wait_for(future, timeout=30.0)
+            answer = await asyncio.wait_for(future, timeout=120.0)  # Increased timeout to 2 minutes
             logger.info(f"Returning answer for question: {question}")
             return {"answer": answer}
         except asyncio.TimeoutError:
-            logger.error(f"Timeout processing question: {question}")
+            logger.error(f"Timeout processing question: {question} after 120 seconds")
             return JSONResponse(
-                content={"answer": "Request timed out. Please try again."},
+                content={"answer": "The request took too long to process. Please try a different question."},
                 status_code=504
             )
         except Exception as e:
