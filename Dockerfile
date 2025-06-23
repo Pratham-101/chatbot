@@ -14,7 +14,7 @@ ENV HF_HOME=/app/.cache/huggingface
 ENV SENTENCE_TRANSFORMERS_HOME=/app/.cache/sentence-transformers
 
 # Install dependencies
-COPY requirements.txt .
+COPY requirements-prod.txt ./requirements.txt
 RUN pip install --upgrade pip && \
     pip install --no-cache-dir -r requirements.txt && \
     python -m spacy download en_core_web_sm && \
