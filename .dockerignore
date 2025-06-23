@@ -26,4 +26,7 @@ conversation_log.json
 
 # IDE/Editor files
 .idea/
-.vscode/ 
+.vscode/
+
+# New additions
+vector_store/ 
