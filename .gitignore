@@ -163,3 +163,7 @@ conversation_log.json
 .Trashes
 ehthumbs.db
 Thumbs.db
+
+# Service account JSON and all .json files
+infra-vertex-463806-g3-f3341a848a30.json
+*.json
