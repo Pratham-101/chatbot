@@ -89,7 +89,7 @@ class RAGChatbot:
 
         if not limited_context_chunks and not web_data:
             print("[RAG] No context chunks or web data found, returning fallback message")
-            return "Sorry, I could not find relevant information in the factsheets or on the web."
+            return "I couldn't find specific information about this in our factsheets. Would you like me to:\n1. Try a broader search\n2. Search the web for more details\n3. Help you find similar funds?"
 
         # Include conversation history in prompt construction (simple concatenation)
         conversation_context = "\n".join(
@@ -109,7 +109,7 @@ class RAGChatbot:
             print(f"[RAG] Generated answer")
         except asyncio.TimeoutError:
             print("[RAG] Timeout generating answer")
-            answer = "Sorry, the request timed out while generating the answer. Please try again."
+            answer = "I'm having trouble generating a complete response right now. You can:\n1. Try rephrasing your question\n2. Ask for specific fund details\n3. Request a simpler summary"
         except Exception as e:
             print(f"[RAG] Exception generating answer: {e}")
             answer = "Sorry, an error occurred while generating the answer. Please try again."

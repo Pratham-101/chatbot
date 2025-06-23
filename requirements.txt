@@ -8,10 +8,15 @@ pypdf
 pdfplumber
 python-dotenv
 streamlit
-numpy==1.26.4
+numpy>=1.21.0,<2.0.0
 pytest
 pytest-asyncio
 fuzzywuzzy
 python-Levenshtein
 spacy
 textblob
+langchain
+langchain-community
+faiss-cpu
+duckduckgo-search
+groq
