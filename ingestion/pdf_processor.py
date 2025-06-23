@@ -126,16 +126,29 @@ class PDFProcessor:
                 })
         return all_chunks
 
-    def process_directory(self, input_dir: str, output_dir: str):
-        """Processes all PDFs in a directory and saves the chunks to a single JSON file."""
+    def process_directory(self, input_dir: str, output_dir: str, file_list: List[str] = None):
+        """
+        Processes PDFs in a directory and saves chunks to a JSON file.
+        If file_list is provided, only processes files in that list.
+        """
         if not os.path.exists(output_dir):
             os.makedirs(output_dir)
             
         all_chunks = []
-        pdf_files = [f for f in os.listdir(input_dir) if f.lower().endswith('.pdf')]
-        print(f"Found {len(pdf_files)} PDF(s) to process in '{input_dir}'.")
+        
+        # Determine which files to process
+        if file_list:
+            files_to_run = file_list
+            print(f"Processing a specific list of {len(files_to_run)} PDF(s).")
+        else:
+            files_to_run = [f for f in os.listdir(input_dir) if f.lower().endswith('.pdf')]
+            print(f"Found {len(files_to_run)} PDF(s) to process in '{input_dir}'.")
 
-        for filename in pdf_files:
+        for filename in files_to_run:
+            if not os.path.exists(os.path.join(input_dir, filename)):
+                print(f"--- Warning: File '{filename}' not found in '{input_dir}'. Skipping. ---")
+                continue
+                
             print(f"--- Processing file: {filename} ---")
             pdf_path = os.path.join(input_dir, filename)
             try:
