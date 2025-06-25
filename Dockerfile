@@ -53,10 +53,14 @@ COPY --from=builder /app/.cache /app/.cache
 # Copy application code
 COPY ./main.py /app/main.py
 COPY ./chatbot /app/chatbot
+COPY ./ingestion /app/ingestion
 COPY download_vector_store.py /app/download_vector_store.py
 
 # Ensure the app user owns the files
 RUN chown -R app:app /app
+
+# Set PYTHONPATH so that ingestion and other top-level modules are found
+ENV PYTHONPATH=/app
 
 # Switch to the non-root user
 USER app
