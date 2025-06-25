@@ -1,6 +1,13 @@
 import os
 from google.cloud import storage
 
+# --- GCP Service Account Key for Render ---
+if "GOOGLE_APPLICATION_CREDENTIALS_JSON" in os.environ:
+    with open("/tmp/gcp_key.json", "w") as f:
+        f.write(os.environ["GOOGLE_APPLICATION_CREDENTIALS_JSON"])
+    os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = "/tmp/gcp_key.json"
+# --- End GCP Service Account Key for Render ---
+
 BUCKET_NAME = "mutualfundpro-vectorstore"
 VECTOR_STORE_DIR = "vector_store"
 
