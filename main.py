@@ -3,6 +3,14 @@ from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 from chatbot.enhanced_chatbot import EnhancedMutualFundChatbot
 from ingestion.vector_store import VectorStore
+import os
+
+# --- GCP Service Account Key for Render ---
+if "GOOGLE_APPLICATION_CREDENTIALS_JSON" in os.environ:
+    with open("/tmp/gcp_key.json", "w") as f:
+        f.write(os.environ["GOOGLE_APPLICATION_CREDENTIALS_JSON"])
+    os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = "/tmp/gcp_key.json"
+# --- End GCP Service Account Key for Render ---
 
 # --- App Initialization ---
 app = FastAPI(
