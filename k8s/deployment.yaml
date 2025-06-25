@@ -17,7 +17,7 @@ spec:
       containers:
       - name: chatbot-api-container
         # IMPORTANT: Replace this with your own image path after building and pushing
-        image: your-dockerhub-username/mutual-fund-chatbot:latest
+        image: pratham0111/mutual-fund-chatbot:latest
         imagePullPolicy: Always
         ports:
         - containerPort: 8000
