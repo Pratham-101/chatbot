@@ -4,6 +4,7 @@ from pydantic import BaseModel
 from chatbot.enhanced_chatbot import EnhancedMutualFundChatbot
 from ingestion.vector_store import VectorStore
 import os
+import gc
 
 # --- GCP Service Account Key for Render ---
 if "GOOGLE_APPLICATION_CREDENTIALS_JSON" in os.environ:
@@ -12,6 +13,16 @@ if "GOOGLE_APPLICATION_CREDENTIALS_JSON" in os.environ:
     os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = "/tmp/gcp_key.json"
 # --- End GCP Service Account Key for Render ---
 
+# --- Memory Optimization for Render Free Tier ---
+# Set environment variables to reduce memory usage
+os.environ["TOKENIZERS_PARALLELISM"] = "false"
+os.environ["TRANSFORMERS_CACHE"] = "/tmp/transformers_cache"
+os.environ["HF_HOME"] = "/tmp/huggingface"
+
+# Force garbage collection to free up memory
+gc.collect()
+# --- End Memory Optimization ---
+
 # --- App Initialization ---
 app = FastAPI(
     title="Mutual Fund Chatbot API",
@@ -19,6 +30,7 @@ app = FastAPI(
     version="1.0.0",
 )
 
+# Initialize chatbot with memory-optimized settings
 chatbot = EnhancedMutualFundChatbot(model_name="llama3-8b-8192")
 
 class QueryRequest(BaseModel):
@@ -37,9 +49,16 @@ async def startup_event():
     before starting the API.
     """
     print("API server starting up...")
-    vector_store = VectorStore()
-    chatbot.set_vector_store(vector_store)
-    print("Chatbot is connected to the vector store and ready.")
+    try:
+        vector_store = VectorStore()
+        chatbot.set_vector_store(vector_store)
+        print("Chatbot is connected to the vector store and ready.")
+        
+        # Force garbage collection after initialization
+        gc.collect()
+    except Exception as e:
+        print(f"Error during startup: {e}")
+        # Continue without vector store if it fails
 
 @app.get("/health", summary="Health Check")
 def health_check():
@@ -58,6 +77,9 @@ async def ask_question(request: QueryRequest):
         answer = await chatbot.process_query(request.text)
         end_time = asyncio.get_event_loop().time()
         
+        # Force garbage collection after each query to free memory
+        gc.collect()
+        
         if not answer:
             raise HTTPException(status_code=500, detail="Failed to generate a response.")
             
@@ -67,4 +89,6 @@ async def ask_question(request: QueryRequest):
         )
     except Exception as e:
         print(f"An error occurred during query processing: {e}")
+        # Force garbage collection on error
+        gc.collect()
         raise HTTPException(status_code=500, detail=str(e))
