@@ -9,6 +9,7 @@ from duckduckgo_search import DDGS
 from groq import Groq, APIError
 
 from ingestion.vector_store import VectorStore
+from chatbot.real_time_data import real_time_provider, market_data_provider
 import spacy
 
 # --- Start of GroqClient Definition ---
@@ -75,7 +76,7 @@ except OSError:
 class EnhancedMutualFundChatbot:
     """
     A chatbot that answers queries about mutual funds by combining information
-    from a local vector store (factsheets) and a real-time web search.
+    from a local vector store (factsheets), real-time web search, and live market data.
     """
     def __init__(self, model_name="llama3-8b-8192"):
         self.client = GroqClient(model=model_name)
@@ -140,38 +141,72 @@ class EnhancedMutualFundChatbot:
             print(f"Error during web search: {e}")
             return "Failed to retrieve information from the web."
 
+    async def _get_real_time_data(self, query: str) -> Dict:
+        """
+        Extract and fetch real-time data based on the query
+        """
+        real_time_data = {}
+        
+        # Extract fund names from query
+        fund_names = re.findall(r'(HDFC.*?Fund|ICICI.*?Fund|SBI.*?Fund|Kotak.*?Fund|Nippon.*?Fund)', query, re.IGNORECASE)
+        
+        if fund_names:
+            # Get live NAV for mentioned funds
+            nav_tasks = [real_time_provider.get_live_nav(fund) for fund in fund_names]
+            nav_results = await asyncio.gather(*nav_tasks, return_exceptions=True)
+            
+            real_time_data['fund_nav'] = [result for result in nav_results if result is not None]
+            
+            # Get fund performance data
+            performance_tasks = [real_time_provider.get_fund_performance(fund) for fund in fund_names]
+            performance_results = await asyncio.gather(*performance_tasks, return_exceptions=True)
+            
+            real_time_data['fund_performance'] = [result for result in performance_results if result is not None]
+        
+        # Get market indices if query mentions market
+        if any(word in query.lower() for word in ['market', 'nifty', 'sensex', 'index', 'indices']):
+            real_time_data['market_indices'] = await real_time_provider.get_market_indices()
+            real_time_data['sector_performance'] = await real_time_provider.get_sector_performance()
+        
+        # Get economic indicators if query mentions economy
+        if any(word in query.lower() for word in ['economy', 'inflation', 'gdp', 'repo rate']):
+            real_time_data['economic_indicators'] = await market_data_provider.get_economic_indicators()
+        
+        return real_time_data
+
     async def process_query(self, query: str) -> str:
         """
-        Processes a query by first extracting key fund names, running a web search for each,
-        then synthesizing a response.
+        Processes a query by combining factsheet data, web search, and real-time data.
         """
         print(f"[Chatbot] Processing query: '{query}'")
         
         # Step 1: Extract key topics/fund names from the query for targeted searches.
-        # A simple keyword approach is more robust than complex NLP for this task.
         fund_keywords = re.findall(r'(HDFC.*?Fund|ICICI.*?Fund|SBI.*?Fund|Kotak.*?Fund|Nippon.*?Fund)', query, re.IGNORECASE)
         if not fund_keywords:
-            # Fallback to the whole query if no specific funds are found
             fund_keywords = [query]
         
         print(f"Extracted search keywords: {fund_keywords}")
 
-        # Step 2: Get context from both sources concurrently for each keyword
-        factsheet_task = asyncio.create_task(self._get_factsheet_context(query)) # One broad search for factsheets
-        
-        # Multiple, targeted web searches
+        # Step 2: Get data from all sources concurrently
+        factsheet_task = asyncio.create_task(self._get_factsheet_context(query))
         web_search_tasks = [self._perform_web_search(keyword) for keyword in fund_keywords]
+        real_time_task = asyncio.create_task(self._get_real_time_data(query))
         
         # Gather all results
-        factsheet_context, *web_results = await asyncio.gather(factsheet_task, *web_search_tasks)
+        factsheet_context, *web_results, real_time_data = await asyncio.gather(
+            factsheet_task, *web_search_tasks, real_time_task
+        )
         
         web_results_str = "\n\n".join(web_results)
 
         # Step 3: Build the prompt for the LLM
         factsheet_str = "\n\n".join(factsheet_context) if factsheet_context else "No specific 2025 factsheet data was found in the local documents."
         
+        # Format real-time data
+        real_time_str = self._format_real_time_data(real_time_data)
+        
         prompt = f"""
-        You are an expert mutual fund advisor. Your task is to provide a comprehensive answer to the user's query by synthesizing information from two sources: internal documents (2025 factsheets) and a real-time web search.
+        You are an expert mutual fund advisor. Your task is to provide a comprehensive answer to the user's query by synthesizing information from three sources: internal documents (2025 factsheets), real-time web search results, and live market data.
 
         User Query: "{query}"
 
@@ -186,28 +221,78 @@ class EnhancedMutualFundChatbot:
         {web_results_str}
         ---
         ====================
+        Source 3: Live Market Data (Real-Time)
+        ---
+        {real_time_str}
+        ---
+        ====================
 
         Instructions:
-        1.  Synthesize a single, coherent answer from BOTH of the sources above.
-        2.  If the query asks for a comparison, structure the response accordingly.
-        3.  Prioritize the web search results for the most current numbers (e.g., performance, AUM).
-        4.  Use the factsheet data to provide details on fund managers, objectives, etc., if available.
-        5.  Clearly state the source of your information (e.g., "According to the April 2025 factsheet...", "The latest web search results show...").
-        6.  If the sources conflict, point this out. If only one source provides information, rely on that one.
-        7.  Do NOT use any of your own internal knowledge. Base your answer ONLY on the data provided above.
-        8.  Structure the response clearly with headings, bullet points, and tables for readability.
+        1. Synthesize a single, coherent answer from ALL three sources above.
+        2. Prioritize real-time data for current NAV, market indices, and live performance.
+        3. Use factsheet data for fund details, objectives, and historical context.
+        4. Use web search results for latest news, analysis, and market commentary.
+        5. Clearly indicate the source and timestamp of real-time data.
+        6. If the sources conflict, prioritize real-time data over historical data.
+        7. Structure the response with clear headings, bullet points, and tables.
+        8. Include relevant market context and economic indicators if applicable.
 
         Provide a comprehensive and helpful response now.
         """
-
-        # Step 4: Generate the final response
-        print("Generating synthesized response...")
-        final_response = await self.client.generate(prompt)
         
-        if not final_response:
-            return "I apologize, but I was unable to generate a response based on the available information."
-            
-        return final_response
+        print("Generating synthesized response...")
+        response = await self.client.generate(prompt)
+        
+        return response
+
+    def _format_real_time_data(self, real_time_data: Dict) -> str:
+        """
+        Format real-time data for inclusion in the prompt
+        """
+        if not real_time_data:
+            return "No real-time data available."
+        
+        formatted_parts = []
+        
+        # Format fund NAV data
+        if 'fund_nav' in real_time_data and real_time_data['fund_nav']:
+            nav_str = "**Live NAV Data:**\n"
+            for nav in real_time_data['fund_nav']:
+                nav_str += f"- {nav['fund_name']}: ₹{nav['nav']} (as of {nav['date']})\n"
+            formatted_parts.append(nav_str)
+        
+        # Format fund performance data
+        if 'fund_performance' in real_time_data and real_time_data['fund_performance']:
+            perf_str = "**Fund Performance Data:**\n"
+            for perf in real_time_data['fund_performance']:
+                perf_str += f"- {perf['fund_name']}: 1Y: {perf['1_year_return']}, 3Y: {perf['3_year_return']}, AUM: {perf['aum']}\n"
+            formatted_parts.append(perf_str)
+        
+        # Format market indices
+        if 'market_indices' in real_time_data:
+            indices = real_time_data['market_indices']
+            indices_str = "**Market Indices:**\n"
+            for index_name, data in indices.items():
+                if index_name != 'last_updated':
+                    indices_str += f"- {index_name.replace('_', ' ').title()}: {data['value']} ({data['change_percent']})\n"
+            formatted_parts.append(indices_str)
+        
+        # Format sector performance
+        if 'sector_performance' in real_time_data:
+            sector_str = "**Sector Performance:**\n"
+            for sector in real_time_data['sector_performance']:
+                sector_str += f"- {sector['sector']}: {sector['performance']}\n"
+            formatted_parts.append(sector_str)
+        
+        # Format economic indicators
+        if 'economic_indicators' in real_time_data:
+            econ_str = "**Economic Indicators:**\n"
+            for indicator, value in real_time_data['economic_indicators'].items():
+                if indicator != 'last_updated':
+                    econ_str += f"- {indicator.replace('_', ' ').title()}: {value}\n"
+            formatted_parts.append(econ_str)
+        
+        return "\n\n".join(formatted_parts) if formatted_parts else "No real-time data available."
 
     async def _extract_fund_names_with_spacy(self, query: str) -> List[str]:
         """Extracts potential fund names using spaCy's named entity recognition."""
