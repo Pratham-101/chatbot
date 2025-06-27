@@ -10,6 +10,7 @@ from groq import Groq, APIError
 
 from ingestion.vector_store import VectorStore
 from chatbot.real_time_data import real_time_provider, market_data_provider
+from chatbot.response_quality import response_evaluator, structured_generator, ResponseQuality, StructuredResponse
 import spacy
 
 # --- Start of GroqClient Definition ---
@@ -241,9 +242,25 @@ class EnhancedMutualFundChatbot:
         """
         
         print("Generating synthesized response...")
-        response = await self.client.generate(prompt)
+        raw_response = await self.client.generate(prompt)
         
-        return response
+        # Step 4: Evaluate response quality
+        print("Evaluating response quality...")
+        context_for_evaluation = f"Factsheet: {factsheet_str[:500]}... Web: {web_results_str[:500]}... Real-time: {real_time_str[:500]}..."
+        quality_metrics = await response_evaluator.evaluate_response(query, context_for_evaluation, raw_response)
+        
+        # Step 5: Generate structured response
+        print("Generating structured response...")
+        structured_response = await structured_generator.generate_structured_response(
+            query, raw_response, real_time_data
+        )
+        
+        # Step 6: Format final response with quality metrics
+        final_response = self._format_final_response(
+            structured_response, quality_metrics, raw_response
+        )
+        
+        return final_response
 
     def _format_real_time_data(self, real_time_data: Dict) -> str:
         """
@@ -293,6 +310,36 @@ class EnhancedMutualFundChatbot:
             formatted_parts.append(econ_str)
         
         return "\n\n".join(formatted_parts) if formatted_parts else "No real-time data available."
+
+    def _format_final_response(self, structured_response: StructuredResponse, 
+                             quality_metrics: ResponseQuality, raw_response: str) -> str:
+        """
+        Format the final response with structured data and quality metrics
+        """
+        # Get the formatted structured response
+        formatted_structured = structured_generator.format_structured_response(structured_response)
+        
+        # Add quality metrics section
+        quality_section = f"""
+## 🎯 Response Quality Assessment
+
+**Overall Score:** {quality_metrics.overall_score}/10
+
+**Detailed Metrics:**
+- **Accuracy:** {quality_metrics.accuracy}/10
+- **Completeness:** {quality_metrics.completeness}/10  
+- **Clarity:** {quality_metrics.clarity}/10
+- **Relevance:** {quality_metrics.relevance}/10
+
+**Feedback:** {quality_metrics.feedback}
+
+---
+"""
+        
+        # Combine everything
+        final_response = formatted_structured + quality_section
+        
+        return final_response
 
     async def _extract_fund_names_with_spacy(self, query: str) -> List[str]:
         """Extracts potential fund names using spaCy's named entity recognition."""
