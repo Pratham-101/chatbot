@@ -7,6 +7,7 @@ from datetime import datetime, timedelta
 from typing import Dict, List, Optional
 import os
 from bs4 import BeautifulSoup
+import yfinance as yf
 
 class RealTimeDataProvider:
     """
@@ -187,6 +188,24 @@ class RealTimeDataProvider:
         except Exception as e:
             print(f"Error comparing funds: {e}")
             return []
+
+    def get_fund_yahoo_data(self, fund_name: str) -> dict:
+        """Fetch AUM, NAV, and other info for a mutual fund or ETF from Yahoo Finance."""
+        try:
+            ticker = yf.Ticker(fund_name)
+            info = ticker.info
+            return {
+                "aum": info.get("totalAssets"),
+                "nav": info.get("navPrice"),
+                "category": info.get("category"),
+                "fund_family": info.get("fundFamily"),
+                "inception_date": info.get("fundInceptionDate"),
+                "expense_ratio": info.get("annualReportExpenseRatio"),
+                "yield": info.get("yield"),
+                "website": info.get("website"),
+            }
+        except Exception as e:
+            return {"error": str(e)}
 
 class MarketDataProvider:
     """

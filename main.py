@@ -5,6 +5,7 @@ from chatbot.enhanced_chatbot import EnhancedMutualFundChatbot
 from ingestion.vector_store import VectorStore
 import os
 import gc
+import traceback
 
 # --- GCP Service Account Key for Render ---
 if "GOOGLE_APPLICATION_CREDENTIALS_JSON" in os.environ:
@@ -135,7 +136,9 @@ async def ask_question(request: QueryRequest):
             raw_response=answer  # For now, using the formatted response as raw
         )
     except Exception as e:
-        print(f"An error occurred during query processing: {e}")
+        print("[EXCEPTION] An error occurred during query processing:")
+        traceback.print_exc()
+        print(f"[EXCEPTION] Exception type: {type(e)} - {e}")
         # Force garbage collection on error
         gc.collect()
         raise HTTPException(status_code=500, detail=str(e))

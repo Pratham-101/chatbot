@@ -90,13 +90,15 @@ class ResponseEvaluator:
             # Parse JSON response
             try:
                 evaluation = json.loads(result_text)
+                if not isinstance(evaluation, dict):
+                    print(f"[DEBUG] Evaluation is not a dict: {type(evaluation)} - {evaluation}")
                 return ResponseQuality(
-                    accuracy=float(evaluation.get("accuracy", 7.0)),
-                    completeness=float(evaluation.get("completeness", 7.0)),
-                    clarity=float(evaluation.get("clarity", 7.0)),
-                    relevance=float(evaluation.get("relevance", 7.0)),
-                    overall_score=float(evaluation.get("overall_score", 7.0)),
-                    feedback=evaluation.get("feedback", "No feedback provided")
+                    accuracy=float(evaluation.get("accuracy", 7.0)) if isinstance(evaluation, dict) else 7.0,
+                    completeness=float(evaluation.get("completeness", 7.0)) if isinstance(evaluation, dict) else 7.0,
+                    clarity=float(evaluation.get("clarity", 7.0)) if isinstance(evaluation, dict) else 7.0,
+                    relevance=float(evaluation.get("relevance", 7.0)) if isinstance(evaluation, dict) else 7.0,
+                    overall_score=float(evaluation.get("overall_score", 7.0)) if isinstance(evaluation, dict) else 7.0,
+                    feedback=evaluation.get("feedback", "No feedback provided") if isinstance(evaluation, dict) else str(evaluation)
                 )
             except (json.JSONDecodeError, ValueError):
                 return ResponseQuality(
@@ -138,47 +140,18 @@ class StructuredResponseGenerator:
             context += f"\nReal-time Data: {json.dumps(real_time_data, indent=2)}"
 
         prompt = f"""
-        Convert the following mutual fund response into a structured format:
+        You are a financial assistant. Given the following chatbot answer, extract and return a JSON object with these fields:
+        - summary
+        - key_points
+        - fund_details
+        - performance_data
+        - risk_metrics
+        - recommendations
+        - sources
+        - disclaimer
 
-        USER QUERY: "{query}"
-        RAW RESPONSE: "{raw_response}"
-
-        Create a structured response with these sections:
-        1. SUMMARY: 2-3 sentence overview
-        2. KEY_POINTS: 3-5 bullet points of main information
-        3. FUND_DETAILS: Extract fund name, type, objective, etc.
-        4. PERFORMANCE_DATA: Returns, AUM, expense ratio, etc.
-        5. RISK_METRICS: Risk level, volatility, etc.
-        6. RECOMMENDATIONS: 2-3 actionable insights
-        7. SOURCES: List of data sources used
-        8. DISCLAIMER: Standard mutual fund disclaimer
-
-        Respond in this exact JSON format:
-        {{
-            "summary": "<brief summary>",
-            "key_points": ["<point1>", "<point2>", "<point3>"],
-            "fund_details": {{
-                "name": "<fund_name>",
-                "type": "<fund_type>",
-                "objective": "<investment_objective>",
-                "category": "<fund_category>"
-            }},
-            "performance_data": {{
-                "1_year_return": "<return>",
-                "3_year_return": "<return>",
-                "5_year_return": "<return>",
-                "aum": "<aum>",
-                "expense_ratio": "<expense_ratio>"
-            }},
-            "risk_metrics": {{
-                "risk_level": "<risk_level>",
-                "volatility": "<volatility>",
-                "beta": "<beta>"
-            }},
-            "recommendations": ["<rec1>", "<rec2>", "<rec3>"],
-            "sources": ["<source1>", "<source2>"],
-            "disclaimer": "<standard_disclaimer>"
-        }}
+        RAW RESPONSE:
+        {raw_response}
         """
 
         try:
@@ -186,27 +159,63 @@ class StructuredResponseGenerator:
                 messages=[{"role": "user", "content": prompt}],
                 model=self.model,
                 temperature=0.3,
-                max_tokens=1000,
+                max_tokens=1200,
                 stream=False,
             )
-            
             result_text = chat_completion.choices[0].message.content or ""
-            
             try:
                 structured_data = json.loads(result_text)
+                if not isinstance(structured_data, dict):
+                    print(f"[DEBUG] Structured data is not a dict: {type(structured_data)} - {structured_data}")
                 return StructuredResponse(
-                    summary=structured_data.get("summary", "Summary unavailable"),
-                    key_points=structured_data.get("key_points", []),
-                    fund_details=structured_data.get("fund_details", {}),
-                    performance_data=structured_data.get("performance_data", {}),
-                    risk_metrics=structured_data.get("risk_metrics", {}),
-                    recommendations=structured_data.get("recommendations", []),
-                    sources=structured_data.get("sources", []),
-                    disclaimer=structured_data.get("disclaimer", "Standard disclaimer applies.")
+                    summary=structured_data.get("summary", "Summary unavailable") if isinstance(structured_data, dict) else "Summary unavailable",
+                    key_points=structured_data.get("key_points", []) if isinstance(structured_data, dict) else [],
+                    fund_details=structured_data.get("fund_details", {}) if isinstance(structured_data, dict) else {},
+                    performance_data=structured_data.get("performance_data", {}) if isinstance(structured_data, dict) else {},
+                    risk_metrics=structured_data.get("risk_metrics", {}) if isinstance(structured_data, dict) else {},
+                    recommendations=structured_data.get("recommendations", []) if isinstance(structured_data, dict) else [],
+                    sources=structured_data.get("sources", []) if isinstance(structured_data, dict) else [],
+                    disclaimer=structured_data.get("disclaimer", "Standard disclaimer applies.") if isinstance(structured_data, dict) else "Standard disclaimer applies."
                 )
             except (json.JSONDecodeError, ValueError):
-                return self._fallback_structured_response(raw_response)
-                
+                # Fallback: try to extract sections using regex/heuristics
+                import re
+                def extract_section(pattern, text):
+                    match = re.search(pattern, text, re.DOTALL | re.IGNORECASE)
+                    return match.group(1).strip() if match else ""
+                summary = extract_section(r"Summary:?\n(.+?)(\n\w|$)", raw_response)
+                key_points = re.findall(r"- (.+)", extract_section(r"Key Points:?\n(.+?)(\n\w|$)", raw_response))
+                fund_details = {}
+                fd_section = extract_section(r"Fund Details:?\n(.+?)(\n\w|$)", raw_response)
+                for line in fd_section.split("\n"):
+                    if ":" in line:
+                        k, v = line.split(":", 1)
+                        fund_details[k.strip()] = v.strip()
+                performance_data = {}
+                pd_section = extract_section(r"Performance Data:?\n(.+?)(\n\w|$)", raw_response)
+                for line in pd_section.split("\n"):
+                    if ":" in line:
+                        k, v = line.split(":", 1)
+                        performance_data[k.strip()] = v.strip()
+                risk_metrics = {}
+                rm_section = extract_section(r"Risk Metrics:?\n(.+?)(\n\w|$)", raw_response)
+                for line in rm_section.split("\n"):
+                    if ":" in line:
+                        k, v = line.split(":", 1)
+                        risk_metrics[k.strip()] = v.strip()
+                recommendations = re.findall(r"- (.+)", extract_section(r"Recommendations:?\n(.+?)(\n\w|$)", raw_response))
+                sources = re.findall(r"- (.+)", extract_section(r"Sources:?\n(.+?)(\n\w|$)", raw_response))
+                disclaimer = extract_section(r"Disclaimer:?\n(.+?)(\n\w|$)", raw_response)
+                return StructuredResponse(
+                    summary=summary or "Summary unavailable",
+                    key_points=key_points,
+                    fund_details=fund_details,
+                    performance_data=performance_data,
+                    risk_metrics=risk_metrics,
+                    recommendations=recommendations,
+                    sources=sources,
+                    disclaimer=disclaimer or "Standard disclaimer applies."
+                )
         except APIError as e:
             print(f"Groq API error during structured generation: {e}")
             return self._fallback_structured_response(raw_response)
@@ -228,54 +237,42 @@ class StructuredResponseGenerator:
 
     def format_structured_response(self, structured_response: StructuredResponse) -> str:
         """
-        Format structured response into readable text
+        Format structured response into readable plain text (no markdown, no emojis)
         """
-        formatted = f"""
-# 📊 Mutual Fund Analysis
-
-## 📋 Summary
-{structured_response.summary}
-
-## 🔑 Key Points
-"""
-        for point in structured_response.key_points:
-            formatted += f"• {point}\n"
-
-        formatted += f"""
-## 📈 Fund Details
-"""
-        for key, value in structured_response.fund_details.items():
-            formatted += f"**{key.replace('_', ' ').title()}:** {value}\n"
-
-        formatted += f"""
-## 📊 Performance Data
-"""
-        for key, value in structured_response.performance_data.items():
-            formatted += f"**{key.replace('_', ' ').title()}:** {value}\n"
-
-        formatted += f"""
-## ⚠️ Risk Metrics
-"""
-        for key, value in structured_response.risk_metrics.items():
-            formatted += f"**{key.replace('_', ' ').title()}:** {value}\n"
-
-        formatted += f"""
-## 💡 Recommendations
-"""
-        for rec in structured_response.recommendations:
-            formatted += f"• {rec}\n"
-
-        formatted += f"""
-## 📚 Sources
-"""
-        for source in structured_response.sources:
-            formatted += f"• {source}\n"
-
-        formatted += f"""
----
-*{structured_response.disclaimer}*
-"""
-        return formatted
+        formatted = f"{structured_response.summary}\n\n"
+        if structured_response.key_points:
+            formatted += "Key Points:\n"
+            for point in structured_response.key_points:
+                formatted += f"  - {point}\n"
+            formatted += "\n"
+        if structured_response.fund_details:
+            formatted += "Fund Details:\n"
+            for key, value in structured_response.fund_details.items():
+                formatted += f"  {key.replace('_', ' ').title()}: {value}\n"
+            formatted += "\n"
+        if structured_response.performance_data:
+            formatted += "Performance Data:\n"
+            for key, value in structured_response.performance_data.items():
+                formatted += f"  {key.replace('_', ' ').title()}: {value}\n"
+            formatted += "\n"
+        if structured_response.risk_metrics:
+            formatted += "Risk Metrics:\n"
+            for key, value in structured_response.risk_metrics.items():
+                formatted += f"  {key.replace('_', ' ').title()}: {value}\n"
+            formatted += "\n"
+        if structured_response.recommendations:
+            formatted += "Recommendations:\n"
+            for rec in structured_response.recommendations:
+                formatted += f"  - {rec}\n"
+            formatted += "\n"
+        if structured_response.sources:
+            formatted += "Sources:\n"
+            for source in structured_response.sources:
+                formatted += f"  - {source}\n"
+            formatted += "\n"
+        if structured_response.disclaimer:
+            formatted += f"Disclaimer:\n  {structured_response.disclaimer}\n"
+        return formatted.strip()
 
 # Global instances
 response_evaluator = ResponseEvaluator()

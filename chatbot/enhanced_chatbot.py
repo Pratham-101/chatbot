@@ -12,6 +12,8 @@ from ingestion.vector_store import VectorStore
 from chatbot.real_time_data import real_time_provider, market_data_provider
 from chatbot.response_quality import response_evaluator, structured_generator, ResponseQuality, StructuredResponse
 import spacy
+from chatbot.knowledge_graph import MutualFundKnowledgeGraph
+from chatbot.web_search import WebSearch
 
 # --- Start of GroqClient Definition ---
 class GroqClient:
@@ -82,8 +84,8 @@ class EnhancedMutualFundChatbot:
     def __init__(self, model_name="llama3-8b-8192"):
         self.client = GroqClient(model=model_name)
         self.vector_store: Optional[VectorStore] = None
-        # This will be populated by the web_search tool call
         self.web_search_tool = None 
+        self.knowledge_graph = MutualFundKnowledgeGraph()
 
     def set_vector_store(self, vector_store: VectorStore):
         self.vector_store = vector_store
@@ -125,21 +127,28 @@ class EnhancedMutualFundChatbot:
         """
         Performs a real-time web search using the duckduckgo_search library.
         """
-        print(f"Performing real-time web search for: '{query}'")
+        print(f"[DEBUG] Entering _perform_web_search for: '{query}'")
         try:
-            # We'll take the top 3 results to get a good summary
-            with DDGS() as ddgs:
-                results = [r for r in ddgs.text(f"latest performance and details for {query} as of 2025", max_results=3)]
-            
+            async def do_search():
+                print(f"[DEBUG] Starting DuckDuckGo search for: '{query}'")
+                with DDGS() as ddgs:
+                    results = [r for r in ddgs.text(f"latest performance and details for {query} as of 2025", max_results=3)]
+                print(f"[DEBUG] DuckDuckGo search complete for: '{query}'")
+                return results
+            try:
+                results = await asyncio.wait_for(do_search(), timeout=10)
+            except asyncio.TimeoutError:
+                print(f"[DEBUG] DuckDuckGo search timed out for: '{query}'")
+                return "Web search timed out."
             if not results:
+                print(f"[DEBUG] No results from DuckDuckGo for: '{query}'")
                 return "No relevant information found on the web."
-
             # Format the results into a single string for the LLM context
             search_summary = "\n\n".join([f"Source: {res['href']}\nSnippet: {res['body']}" for res in results])
-            print("Web search successful.")
+            print(f"[DEBUG] Web search successful for: '{query}'")
             return search_summary
         except Exception as e:
-            print(f"Error during web search: {e}")
+            print(f"[DEBUG] Error during web search for '{query}': {e}")
             return "Failed to retrieve information from the web."
 
     async def _get_real_time_data(self, query: str) -> Dict:
@@ -188,7 +197,28 @@ class EnhancedMutualFundChatbot:
         
         print(f"Extracted search keywords: {fund_keywords}")
 
-        # Step 2: Get data from all sources concurrently
+        # Step 1.5: Try knowledge graph first for direct fund details
+        kg_fund_data = None
+        for fund in fund_keywords:
+            kg_fund_data = self.knowledge_graph.get_fund(fund)
+            if kg_fund_data:
+                print(f"Found fund in knowledge graph: {fund}")
+                break
+        if kg_fund_data:
+            response = self._format_kg_response(kg_fund_data, query)
+            return response
+
+        # Step 2: Try web search attribute extraction and update knowledge graph
+        web_search = WebSearch()
+        for fund in fund_keywords:
+            web_attrs = await web_search.search_and_extract_attributes(fund)
+            if web_attrs and len(web_attrs) > 1:
+                print(f"Extracted attributes from web for {fund}: {web_attrs}")
+                self.knowledge_graph.update_fund(fund, web_attrs)
+                response = self._format_kg_response(web_attrs, query)
+                return response
+
+        # Step 3: Get data from all sources concurrently
         factsheet_task = asyncio.create_task(self._get_factsheet_context(query))
         web_search_tasks = [self._perform_web_search(keyword) for keyword in fund_keywords]
         real_time_task = asyncio.create_task(self._get_real_time_data(query))
@@ -200,7 +230,7 @@ class EnhancedMutualFundChatbot:
         
         web_results_str = "\n\n".join(web_results)
 
-        # Step 3: Build the prompt for the LLM
+        # Step 4: Build the prompt for the LLM
         factsheet_str = "\n\n".join(factsheet_context) if factsheet_context else "No specific 2025 factsheet data was found in the local documents."
         
         # Format real-time data
@@ -244,23 +274,43 @@ class EnhancedMutualFundChatbot:
         print("Generating synthesized response...")
         raw_response = await self.client.generate(prompt)
         
-        # Step 4: Evaluate response quality
+        # Step 5: Evaluate response quality
         print("Evaluating response quality...")
         context_for_evaluation = f"Factsheet: {factsheet_str[:500]}... Web: {web_results_str[:500]}... Real-time: {real_time_str[:500]}..."
         quality_metrics = await response_evaluator.evaluate_response(query, context_for_evaluation, raw_response)
         
-        # Step 5: Generate structured response
+        # Step 6: Generate structured response
         print("Generating structured response...")
         structured_response = await structured_generator.generate_structured_response(
             query, raw_response, real_time_data
         )
         
-        # Step 6: Format final response with quality metrics
+        # Step 7: Format final response with quality metrics
         final_response = self._format_final_response(
             structured_response, quality_metrics, raw_response
         )
         
-        return final_response
+        context_chunks = []
+        if factsheet_context:
+            context_chunks.append(str(factsheet_context))
+        if web_results:
+            for r in web_results:
+                if isinstance(r, dict):
+                    if r.get('snippet'):
+                        context_chunks.append(r.get('snippet', ''))
+                elif isinstance(r, str):
+                    context_chunks.append(r)
+        if real_time_data:
+            context_chunks.append(str(real_time_data))
+        if self.llm_available():
+            # Use LLM to generate a full, conversational answer
+            if asyncio.iscoroutinefunction(self.generate_llm_answer):
+                return await self.generate_llm_answer(query, context_chunks, web_results, real_time_data)
+            else:
+                return self.generate_llm_answer(query, context_chunks, web_results, real_time_data)
+        else:
+            # Use fallback synthesis
+            return self.synthesize_fallback_answer(fund_name, factsheet_context, web_results, real_time_data)
 
     def _format_real_time_data(self, real_time_data: Dict) -> str:
         """
@@ -416,4 +466,226 @@ class EnhancedMutualFundChatbot:
             response_parts.append("\nFactsheet data:")
             response_parts.append('\n'.join(factsheet_context))
             
-        return '\n'.join(response_parts) 
+        return '\n'.join(response_parts)
+
+    def _format_kg_response(self, fund_data: dict, query: str) -> str:
+        """Format a structured response from knowledge graph data."""
+        lines = [f"\U0001F4C8 Fund Name: {fund_data.get('fund_name', 'Unknown')}"]
+        if 'fund_manager' in fund_data:
+            lines.append(f"- Fund Manager: {fund_data['fund_manager']}")
+        if 'aum' in fund_data:
+            lines.append(f"- AUM: {fund_data['aum']}")
+        if 'inception_date' in fund_data:
+            lines.append(f"- Inception Date: {fund_data['inception_date']}")
+        if 'expense_ratio' in fund_data:
+            lines.append(f"- Expense Ratio: {fund_data['expense_ratio']}")
+        if 'returns' in fund_data:
+            lines.append(f"- Returns: {fund_data['returns']}")
+        if 'category' in fund_data:
+            lines.append(f"- Category: {fund_data['category']}")
+        if 'risk' in fund_data:
+            lines.append(f"- Risk: {fund_data['risk']}")
+        lines.append("")
+        lines.append("(This answer was generated from the knowledge graph. If you need more details, ask for performance, comparison, or latest news.)")
+        return "\n".join(lines)
+
+    def update_knowledge_graph(self, fund_name: str, attributes: dict):
+        """Update the knowledge graph with new attributes for a fund."""
+        self.knowledge_graph.update_fund(fund_name, attributes)
+
+    def _deduplicate_snippets(self, factsheet_chunks, web_results):
+        """Remove duplicate snippets between factsheet and web results."""
+        seen = set()
+        deduped_factsheet = []
+        deduped_web = []
+        # Deduplicate by normalized text
+        for chunk in factsheet_chunks or []:
+            norm = chunk.strip().lower()
+            if norm and norm not in seen:
+                deduped_factsheet.append(chunk)
+                seen.add(norm)
+        for r in web_results or []:
+            snippet = r.get('snippet') if isinstance(r, dict) else r
+            norm = (snippet or '').strip().lower()
+            if norm and norm not in seen:
+                deduped_web.append(r)
+                seen.add(norm)
+        return deduped_factsheet, deduped_web
+
+    def _extract_all_attributes(self, factsheet_chunks, web_results):
+        """Extract key metrics from factsheet and web snippets."""
+        ws = WebSearch()
+        # From web
+        web_snippets = [r.get('snippet', '') if isinstance(r, dict) else r for r in web_results or []]
+        web_attrs = ws.extract_fund_attributes(web_snippets)
+        # From factsheet (simple regex/heuristics)
+        factsheet_text = ' '.join(factsheet_chunks or [])
+        attrs = dict(web_attrs)
+        import re
+        patterns = {
+            'aum': r'AUM[:\s]+([\d,.]+ ?(Cr|crore|billion|lakh|mn|million)?)',
+            'nav': r'NAV[:\s]+([\d,.]+)',
+            'returns': r'(\d{1,2}\.\d{1,2}% ?(?:CAGR|return|p.a.))',
+            'expense_ratio': r'Expense Ratio[:\s]+([\d.]+%)',
+            'risk': r'Risk[:\s]+([A-Za-z ]+)',
+            'fund_manager': r'Fund Manager[s]?: ([A-Za-z ,.]+)',
+            'top_holdings': r'Top Holdings?: ([A-Za-z0-9, &]+)',
+        }
+        for key, pat in patterns.items():
+            match = re.search(pat, factsheet_text, re.IGNORECASE)
+            if match:
+                attrs[key] = match.group(1).strip()
+        return attrs
+
+    def _format_key_metrics(self, attrs):
+        """Format key metrics as bullet points."""
+        lines = []
+        for label, key in [
+            ("AUM", "aum"), ("NAV", "nav"), ("1Y/3Y/5Y Returns", "returns"),
+            ("Expense Ratio", "expense_ratio"), ("Risk", "risk"),
+            ("Fund Manager", "fund_manager"), ("Top Holdings", "top_holdings")]:
+            if attrs.get(key):
+                lines.append(f"- **{label}:** {attrs[key]}")
+        return '\n'.join(lines)
+
+    def _compose_narrative_summary(self, fund_name, attrs):
+        """Compose a narrative summary sentence."""
+        summary = f"{fund_name or 'This fund'}"
+        if attrs.get('category'):
+            summary += f" is a {attrs['category']}"
+        summary += " mutual fund"
+        if attrs.get('aum'):
+            summary += f" with an AUM of {attrs['aum']}"
+        if attrs.get('returns'):
+            summary += f" and a recent return of {attrs['returns']}"
+        if attrs.get('expense_ratio'):
+            summary += f". The expense ratio is {attrs['expense_ratio']}"
+        if attrs.get('fund_manager'):
+            summary += f", managed by {attrs['fund_manager']}"
+        if attrs.get('risk'):
+            summary += f". Risk level: {attrs['risk']}"
+        summary += "."
+        return summary
+
+    def _format_metrics_table(self, attrs):
+        """Format key metrics as a markdown table."""
+        headers = ["Metric", "Value"]
+        rows = []
+        for label, key in [
+            ("AUM", "aum"), ("NAV", "nav"), ("1Y Return", "1_year_return"), ("3Y Return", "3_year_return"), ("5Y Return", "5_year_return"),
+            ("Expense Ratio", "expense_ratio"), ("Risk", "risk"), ("Fund Manager", "fund_manager"), ("Top Holdings", "top_holdings")]:
+            if attrs.get(key):
+                rows.append(f"| **{label}** | {attrs[key]} |")
+        if not rows:
+            return ""
+        table = f"| {' | '.join(headers)} |\n|{'---|'*len(headers)}\n" + '\n'.join(rows)
+        return table
+
+    def _format_bullets(self, items, label):
+        if not items:
+            return ""
+        return f"**{label}:**\n" + '\n'.join([f"- {item}" for item in items])
+
+    def _extract_benefits_and_risks(self, factsheet_chunks, web_results):
+        """Extract benefits and risks from all sources (simple heuristics)."""
+        text = ' '.join(factsheet_chunks or []) + ' ' + ' '.join([r.get('snippet', r) if isinstance(r, dict) else r for r in web_results or []])
+        benefits = []
+        risks = []
+        # Heuristic: look for sentences with 'benefit', 'advantage', 'pro', 'suitable', 'ideal', 'good for', etc.
+        for sent in re.split(r'[.\n]', text):
+            s = sent.strip()
+            if not s:
+                continue
+            if any(w in s.lower() for w in ['benefit', 'advantage', 'pro', 'suitable', 'ideal', 'good for', 'best for', 'why invest']):
+                benefits.append(s)
+            if any(w in s.lower() for w in ['risk', 'con', 'drawback', 'volatility', 'downside', 'not ideal', 'caution', 'tax', 'loss']):
+                risks.append(s)
+        return benefits[:5], risks[:3]
+
+    def _format_who_for(self, attrs, text):
+        # Heuristic: try to guess suitability
+        if 'risk' in attrs and 'moderate' in attrs['risk'].lower():
+            return "Suitable for investors with a medium-term horizon who are comfortable with some volatility."
+        if 'risk' in attrs and 'low' in attrs['risk'].lower():
+            return "Ideal for conservative investors seeking stable returns."
+        if 'risk' in attrs and 'high' in attrs['risk'].lower():
+            return "Best for aggressive investors willing to accept higher risk for higher returns."
+        # Fallback
+        if 'category' in attrs:
+            return f"This fund is suitable for investors looking for {attrs['category']} exposure."
+        return "Suitable for investors seeking mutual fund exposure in this category."
+
+    def synthesize_fallback_answer(self, fund_name, factsheet_data, web_results, yahoo_data):
+        """Generate a ChatGPT-style, narrative answer from available sources."""
+        factsheet_chunks = factsheet_data if isinstance(factsheet_data, list) else [factsheet_data] if factsheet_data else []
+        deduped_factsheet, deduped_web = self._deduplicate_snippets(factsheet_chunks, web_results)
+        attrs = self._extract_all_attributes(deduped_factsheet, deduped_web)
+        # Compose summary
+        summary = self._compose_narrative_summary(fund_name, attrs)
+        table = self._format_metrics_table(attrs)
+        benefits, risks = self._extract_benefits_and_risks(deduped_factsheet, deduped_web)
+        who_for = self._format_who_for(attrs, summary)
+        answer = f"{summary}\n\n"
+        if table:
+            answer += f"{table}\n\n"
+        if benefits:
+            answer += self._format_bullets(benefits, "Key Benefits") + "\n\n"
+        if risks:
+            answer += self._format_bullets(risks, "Risks / Cons") + "\n\n"
+        answer += f"**Who It's For:** {who_for}\n\n"
+        answer += "**Final Take:** This fund offers a blend of the above features. Please review the details and consult a financial advisor before investing.\n\n"
+        # Add deduped factsheet/web info as highlights
+        if deduped_factsheet:
+            answer += "**Factsheet Highlights:**\n" + '\n'.join(deduped_factsheet[:2]) + "\n"
+        if deduped_web:
+            answer += "**Web Highlights:**\n" + '\n'.join([r.get('snippet', r) if isinstance(r, dict) else r for r in deduped_web[:2]]) + "\n"
+        answer += "\n_Sources: Factsheet, Web search_"
+        return answer
+
+    async def generate_llm_answer(self, query: str, context_chunks: list, web_results: list, yahoo_data: dict) -> str:
+        """Generate a ChatGPT-style, narrative answer using all available data."""
+        fund_name = None
+        if query:
+            import re
+            match = re.search(r'(HDFC.*?Fund|ICICI.*?Fund|SBI.*?Fund|Kotak.*?Fund|Nippon.*?Fund)', query, re.IGNORECASE)
+            if match:
+                fund_name = match.group(1)
+        factsheet_chunks = context_chunks if isinstance(context_chunks, list) else [context_chunks] if context_chunks else []
+        deduped_factsheet, deduped_web = self._deduplicate_snippets(factsheet_chunks, web_results)
+        attrs = self._extract_all_attributes(deduped_factsheet, deduped_web)
+        summary = self._compose_narrative_summary(fund_name, attrs)
+        table = self._format_metrics_table(attrs)
+        benefits, risks = self._extract_benefits_and_risks(deduped_factsheet, deduped_web)
+        who_for = self._format_who_for(attrs, summary)
+        # Compose a detailed prompt for the LLM
+        prompt = f"""
+You are a mutual fund expert. Using the following extracted data, answer the user's question in a detailed, ChatGPT-style, narrative format. Start with a summary, then a markdown table of key metrics, then list key benefits and risks, then a 'Who It's For' section, and end with a 'Final Take'. Use markdown formatting. Cite sources at the end. If any data is missing, say 'Data not available'.
+
+User question: {query}
+
+Extracted attributes:
+{json.dumps(attrs, indent=2)}
+
+Factsheet highlights:
+{json.dumps(deduped_factsheet[:2], indent=2)}
+
+Web highlights:
+{json.dumps([r.get('snippet', r) if isinstance(r, dict) else r for r in deduped_web[:2]], indent=2)}
+
+---
+Now generate the answer as described above.
+"""
+        # If LLM is available, call it; else fallback
+        try:
+            if self.llm_available():
+                # Properly await the async call
+                return await self.client.generate(prompt)
+            else:
+                return self.synthesize_fallback_answer(fund_name, factsheet_chunks, web_results, yahoo_data)
+        except Exception as e:
+            print(f"[LLM ERROR] {e}")
+            return self.synthesize_fallback_answer(fund_name, factsheet_chunks, web_results, yahoo_data)
+
+    def llm_available(self):
+        """Check if the LLM is available."""
+        return self.client is not None 
