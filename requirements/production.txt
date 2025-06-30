@@ -1,0 +1,41 @@
+# Include base requirements
+-r base.txt
+
+# Production web server
+gunicorn>=21.2.0
+
+# Production monitoring
+sentry-sdk[fastapi]>=1.38.0
+
+# Production database
+psycopg2-binary>=2.9.0
+
+# Production caching
+redis>=5.0.0
+
+# Production task queue
+celery>=5.3.0
+
+# Production security
+bcrypt>=4.0.0
+
+# Production logging
+structlog[rich]>=23.2.0
+
+# Production metrics
+prometheus-client>=0.19.0
+
+# Production HTTP client
+httpx>=0.25.0
+
+# Production JSON processing
+orjson>=3.9.0
+
+# Production compression
+brotli>=1.1.0
+
+# Production SSL
+pyopenssl>=23.0.0
+
+# Production environment
+python-dotenv>=1.0.0 

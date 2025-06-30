@@ -1,0 +1,56 @@
+# Include base requirements
+-r base.txt
+
+# Testing
+pytest>=7.4.0
+pytest-asyncio>=0.21.0
+pytest-cov>=4.1.0
+pytest-mock>=3.12.0
+pytest-xdist>=3.3.0
+pytest-benchmark>=4.0.0
+httpx>=0.25.0
+
+# Code quality and formatting
+black>=23.0.0
+isort>=5.12.0
+flake8>=6.0.0
+mypy>=1.7.0
+bandit>=1.7.5
+pre-commit>=3.5.0
+
+# Documentation
+mkdocs>=1.5.0
+mkdocs-material>=9.4.0
+mkdocstrings[python]>=0.24.0
+
+# Development tools
+jupyter>=1.0.0
+ipython>=8.0.0
+notebook>=7.0.0
+
+# Debugging
+ipdb>=0.13.0
+rich>=13.0.0
+
+# Type checking
+types-requests>=2.31.0
+types-PyYAML>=6.0.0
+types-psutil>=5.9.0
+
+# Database (for development)
+sqlalchemy>=2.0.0
+alembic>=1.12.0
+psycopg2-binary>=2.9.0
+
+# Caching (for development)
+redis>=5.0.0
+
+# API documentation
+fastapi[all]>=0.104.0
+
+# Performance profiling
+py-spy>=0.3.0
+memory-profiler>=0.61.0
+
+# Security scanning
+safety>=2.3.0 

@@ -100,8 +100,16 @@ class EnhancedMutualFundChatbot:
 
         print("Attempting to retrieve context from local factsheets...")
         try:
-            from sentence_transformers import SentenceTransformer
-            embedding_model = SentenceTransformer('all-MiniLM-L6-v2')
+            # Try to import sentence_transformers with proper error handling
+            try:
+                from sentence_transformers import SentenceTransformer
+                embedding_model = SentenceTransformer('all-MiniLM-L6-v2')
+            except ImportError as e:
+                print(f"Warning: sentence_transformers not available: {e}")
+                return []
+            except Exception as e:
+                print(f"Warning: Error loading sentence transformer model: {e}")
+                return []
             
             # Simple keyword query, boosted with the year
             search_query = f"{query} 2025"
@@ -175,92 +183,87 @@ class EnhancedMutualFundChatbot:
         
         return real_time_data
 
-    async def process_query(self, query: str) -> str:
+    async def process_query(self, query: str) -> dict:
         """
         Processes a query by combining factsheet data, web search, and real-time data.
+        Returns a dict with both the full LLM answer and the formatted/structured response.
         """
         print(f"[Chatbot] Processing query: '{query}'")
-        
-        # Step 1: Extract key topics/fund names from the query for targeted searches.
         fund_keywords = re.findall(r'(HDFC.*?Fund|ICICI.*?Fund|SBI.*?Fund|Kotak.*?Fund|Nippon.*?Fund)', query, re.IGNORECASE)
         if not fund_keywords:
             fund_keywords = [query]
-        
         print(f"Extracted search keywords: {fund_keywords}")
-
-        # Step 2: Get data from all sources concurrently
         factsheet_task = asyncio.create_task(self._get_factsheet_context(query))
         web_search_tasks = [self._perform_web_search(keyword) for keyword in fund_keywords]
         real_time_task = asyncio.create_task(self._get_real_time_data(query))
-        
-        # Gather all results
         factsheet_context, *web_results, real_time_data = await asyncio.gather(
             factsheet_task, *web_search_tasks, real_time_task
         )
-        
         web_results_str = "\n\n".join(web_results)
-
-        # Step 3: Build the prompt for the LLM
         factsheet_str = "\n\n".join(factsheet_context) if factsheet_context else "No specific 2025 factsheet data was found in the local documents."
-        
-        # Format real-time data
         real_time_str = self._format_real_time_data(real_time_data)
-        
         prompt = f"""
-        You are an expert mutual fund advisor. Your task is to provide a comprehensive answer to the user's query by synthesizing information from three sources: internal documents (2025 factsheets), real-time web search results, and live market data.
+        You are an expert mutual fund advisor with deep knowledge of the Indian mutual fund industry. You have access to comprehensive data from multiple sources and your goal is to provide insightful, well-researched answers that help investors make informed decisions.
 
-        User Query: "{query}"
+        **User's Question:** {query}
 
-        ====================
-        Source 1: Internal Factsheet Data (Year 2025)
-        ---
+        **Available Information Sources:**
+
+        **📊 Internal Factsheet Data (2025):**
         {factsheet_str}
-        ---
-        ====================
-        Source 2: Real-Time Web Search Results (Current Data)
-        ---
+
+        **🌐 Real-Time Web Search Results:**
         {web_results_str}
-        ---
-        ====================
-        Source 3: Live Market Data (Real-Time)
-        ---
+
+        **📈 Live Market Data:**
         {real_time_str}
-        ---
-        ====================
 
-        Instructions:
-        1. Synthesize a single, coherent answer from ALL three sources above.
-        2. Prioritize real-time data for current NAV, market indices, and live performance.
-        3. Use factsheet data for fund details, objectives, and historical context.
-        4. Use web search results for latest news, analysis, and market commentary.
-        5. Clearly indicate the source and timestamp of real-time data.
-        6. If the sources conflict, prioritize real-time data over historical data.
-        7. Structure the response with clear headings, bullet points, and tables.
-        8. Include relevant market context and economic indicators if applicable.
+        **Your Response Guidelines:**
 
-        Provide a comprehensive and helpful response now.
+        Write a comprehensive, engaging response that feels like a conversation with a knowledgeable friend who happens to be a mutual fund expert. Here's how to structure your answer:
+
+        1. **Start with a compelling overview** - Give the reader a clear picture of what they're asking about
+        2. **Present key metrics in an easy-to-understand format** - Use tables, bullet points, and clear formatting
+        3. **Provide detailed analysis** - Explain the "why" behind the numbers, not just the "what"
+        4. **Include market context** - Help the reader understand how this fits into the broader market
+        5. **Offer actionable insights** - What should the reader consider or do next?
+        6. **Be conversational but professional** - Use natural language, avoid jargon unless necessary
+
+        **Key Requirements:**
+        - Prioritize real-time data for current NAV, performance, and market conditions
+        - Use factsheet data for fund details, objectives, and historical context
+        - Incorporate web search results for latest news and market commentary
+        - Always cite your sources clearly
+        - If data sources conflict, explain the discrepancy and prioritize the most recent information
+        - Write in a warm, engaging tone that builds trust
+        - Use markdown formatting for clarity (bold headers, bullet points, tables)
+        - Include specific numbers, percentages, and dates when available
+        - End with a thoughtful conclusion that ties everything together
+
+        **Remember:** You're not just providing data - you're helping someone understand their investment options and make better financial decisions. Be thorough, be clear, and be genuinely helpful.
+
+        Now, provide your comprehensive analysis:
         """
-        
         print("Generating synthesized response...")
         raw_response = await self.client.generate(prompt)
-        
-        # Step 4: Evaluate response quality
         print("Evaluating response quality...")
         context_for_evaluation = f"Factsheet: {factsheet_str[:500]}... Web: {web_results_str[:500]}... Real-time: {real_time_str[:500]}..."
         quality_metrics = await response_evaluator.evaluate_response(query, context_for_evaluation, raw_response)
-        
-        # Step 5: Generate structured response
         print("Generating structured response...")
         structured_response = await structured_generator.generate_structured_response(
             query, raw_response, real_time_data
         )
-        
-        # Step 6: Format final response with quality metrics
+        print("Formatting final response...")
         final_response = self._format_final_response(
             structured_response, quality_metrics, raw_response
         )
-        
-        return final_response
+        return {
+            "full_answer": raw_response,
+            "formatted_answer": final_response,
+            "quality_metrics": quality_metrics,
+            "structured_data": structured_response,
+            "raw_response": raw_response
+        }
 
     def _format_real_time_data(self, real_time_data: Dict) -> str:
         """
@@ -416,4 +419,65 @@ class EnhancedMutualFundChatbot:
             response_parts.append("\nFactsheet data:")
             response_parts.append('\n'.join(factsheet_context))
             
-        return '\n'.join(response_parts) 
+        return '\n'.join(response_parts)
+
+    async def get_full_llm_answer(self, query: str) -> str:
+        """
+        Returns only the full, conversational LLM answer (raw_response) for a query.
+        """
+        fund_keywords = re.findall(r'(HDFC.*?Fund|ICICI.*?Fund|SBI.*?Fund|Kotak.*?Fund|Nippon.*?Fund)', query, re.IGNORECASE)
+        if not fund_keywords:
+            fund_keywords = [query]
+        factsheet_task = asyncio.create_task(self._get_factsheet_context(query))
+        web_search_tasks = [self._perform_web_search(keyword) for keyword in fund_keywords]
+        real_time_task = asyncio.create_task(self._get_real_time_data(query))
+        factsheet_context, *web_results, real_time_data = await asyncio.gather(
+            factsheet_task, *web_search_tasks, real_time_task
+        )
+        web_results_str = "\n\n".join(web_results)
+        factsheet_str = "\n\n".join(factsheet_context) if factsheet_context else "No specific 2025 factsheet data was found in the local documents."
+        real_time_str = self._format_real_time_data(real_time_data)
+        prompt = f"""
+        You are an expert mutual fund advisor with deep knowledge of the Indian mutual fund industry. You have access to comprehensive data from multiple sources and your goal is to provide insightful, well-researched answers that help investors make informed decisions.
+
+        **User's Question:** {query}
+
+        **Available Information Sources:**
+
+        **📊 Internal Factsheet Data (2025):**
+        {factsheet_str}
+
+        **🌐 Real-Time Web Search Results:**
+        {web_results_str}
+
+        **📈 Live Market Data:**
+        {real_time_str}
+
+        **Your Response Guidelines:**
+
+        Write a comprehensive, engaging response that feels like a conversation with a knowledgeable friend who happens to be a mutual fund expert. Here's how to structure your answer:
+
+        1. **Start with a compelling overview** - Give the reader a clear picture of what they're asking about
+        2. **Present key metrics in an easy-to-understand format** - Use tables, bullet points, and clear formatting
+        3. **Provide detailed analysis** - Explain the "why" behind the numbers, not just the "what"
+        4. **Include market context** - Help the reader understand how this fits into the broader market
+        5. **Offer actionable insights** - What should the reader consider or do next?
+        6. **Be conversational but professional** - Use natural language, avoid jargon unless necessary
+
+        **Key Requirements:**
+        - Prioritize real-time data for current NAV, performance, and market conditions
+        - Use factsheet data for fund details, objectives, and historical context
+        - Incorporate web search results for latest news and market commentary
+        - Always cite your sources clearly
+        - If data sources conflict, explain the discrepancy and prioritize the most recent information
+        - Write in a warm, engaging tone that builds trust
+        - Use markdown formatting for clarity (bold headers, bullet points, tables)
+        - Include specific numbers, percentages, and dates when available
+        - End with a thoughtful conclusion that ties everything together
+
+        **Remember:** You're not just providing data - you're helping someone understand their investment options and make better financial decisions. Be thorough, be clear, and be genuinely helpful.
+
+        Now, provide your comprehensive analysis:
+        """
+        raw_response = await self.client.generate(prompt)
+        return raw_response 
