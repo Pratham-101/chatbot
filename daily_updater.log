@@ -1,8 +1,0 @@
-2025-07-05 12:50:13,563 - INFO - 🚀 Starting daily mutual fund data update...
-2025-07-05 12:50:13,581 - INFO - ✅ Connected to PostgreSQL database
-2025-07-05 12:50:13,581 - INFO - 📥 Fetching NAV data from AMFI...
-2025-07-05 12:50:13,836 - ERROR - ❌ Error fetching AMFI data: could not convert string to float: 'INF209KA13Z9'
-2025-07-05 12:50:13,843 - INFO - ✅ Updated returns for 3 funds
-2025-07-05 12:50:13,844 - INFO - ✅ Updated analytics for 3 funds
-2025-07-05 12:50:13,844 - INFO - ✅ Daily update completed successfully!
-2025-07-05 12:50:13,844 - INFO - Database connection closed

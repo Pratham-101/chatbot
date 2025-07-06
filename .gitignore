@@ -1,0 +1,36 @@
+# Python virtual environment
+venv/
+
+# Jupyter and Python cache
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.ipynb_checkpoints/
+
+# Data and vector store files
+vector_store/
+processed_data/
+*.sqlite3
+*.bin
+*.dylib
+*.so
+*.json
+
+# System files
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+
+# Environment/config files
+.env
+.env.*
+
+# Ignore large factsheets and PDFs (if not needed in repo)
+data/*.pdf
+data/*.xlsx
+
+# Ignore backup files
+*.bak 
