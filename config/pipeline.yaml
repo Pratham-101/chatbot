@@ -1,0 +1,6 @@
+extractors:
+  - doctr
+  - donut
+retriever: hybrid
+
+evaluator: fuzzy 

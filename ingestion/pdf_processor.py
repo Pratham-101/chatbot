@@ -5,6 +5,7 @@ from typing import List, Dict, Any
 import pdfplumber
 from pypdf import PdfReader
 from sentence_transformers import SentenceTransformer
+from ingestion.pdf_table_extractor import extract_fund_factsheet_data
 
 class PDFProcessor:
     def __init__(self):
@@ -126,14 +127,17 @@ class PDFProcessor:
                 })
         return all_chunks
 
-    def process_directory(self, input_dir: str, output_dir: str, file_list: List[str] = None):
+    def process_directory(self, input_dir: str, output_dir: str, file_list: List[str] = None, structured_output_dir: str = "processed_structured_data"):
         """
         Processes PDFs in a directory and saves chunks to a JSON file.
+        Also extracts structured data and saves as JSON per PDF.
         If file_list is provided, only processes files in that list.
         """
         if not os.path.exists(output_dir):
             os.makedirs(output_dir)
-            
+        if not os.path.exists(structured_output_dir):
+            os.makedirs(structured_output_dir)
+        
         all_chunks = []
         
         # Determine which files to process
@@ -152,11 +156,17 @@ class PDFProcessor:
             print(f"--- Processing file: {filename} ---")
             pdf_path = os.path.join(input_dir, filename)
             try:
+                # Existing chunk/text processing
                 chunks = self.process_pdf(pdf_path)
-                # Add the source filename to each chunk for traceability
                 for chunk in chunks:
                     chunk['source_file'] = filename
                 all_chunks.extend(chunks)
+                # New: Structured data extraction
+                structured_data = extract_fund_factsheet_data(pdf_path)
+                structured_json_path = os.path.join(structured_output_dir, f"{os.path.splitext(filename)[0]}.json")
+                with open(structured_json_path, 'w', encoding='utf-8') as sf:
+                    json.dump(structured_data, sf, indent=2, ensure_ascii=False)
+                print(f"  - Saved structured data to {structured_json_path}")
             except Exception as e:
                 print(f"--- Failed to process {filename}. Skipping. Error: {e} ---")
                 continue # Move to the next file

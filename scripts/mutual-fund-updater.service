@@ -1,0 +1,16 @@
+[Unit]
+Description=Daily Mutual Fund Data Updater
+After=network.target postgresql.service
+Wants=postgresql.service
+
+[Service]
+Type=simple
+User=pratham
+WorkingDirectory=/Users/pratham/Desktop/mutual_fund_chatbot
+Environment=PATH=/Users/pratham/Desktop/mutual_fund_chatbot/venv/bin
+ExecStart=/Users/pratham/Desktop/mutual_fund_chatbot/venv/bin/python src/services/data/daily_updater.py --schedule
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target 

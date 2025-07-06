@@ -1,6 +1,12 @@
+import os
+from dotenv import load_dotenv
+load_dotenv()
 import streamlit as st
 import requests
 import json
+from chatbot.enhanced_chatbot import answer_query
+import base64
+import re
 
 st.set_page_config(page_title="Mutual Fund Chatbot Review", layout="centered")
 st.title("🤖 Mutual Fund Chatbot Review UI")
@@ -8,12 +14,25 @@ st.title("🤖 Mutual Fund Chatbot Review UI")
 API_URL = "http://localhost:8000/query"
 
 st.markdown("Enter your mutual fund question below:")
-question = st.text_input("Your question", "Tell me about HDFC Defence Fund?")
+query = st.text_input("Your question", "Tell me about HDFC Defence Fund?")
+
+if query:
+    with st.spinner("Fetching answer..."):
+        answer = answer_query(query)
+    # Split out base64 images and display them
+    text = re.sub(r'!\[.*?\]\(data:image/png;base64,[^\)]+\)', '', answer)
+    st.markdown(text)
+    img_matches = re.findall(r'!\[.*?\]\(data:image/png;base64,([^\)]+)\)', answer)
+    for img_b64 in img_matches:
+        st.image(base64.b64decode(img_b64), use_column_width=True)
+    # Optionally, allow download of last chart
+    if img_matches:
+        st.download_button("Download Chart", base64.b64decode(img_matches[-1]), file_name="chart.png", mime="image/png")
 
 if st.button("Ask"):    
     with st.spinner("Getting answer..."):
         try:
-            resp = requests.post(API_URL, json={"text": question}, timeout=60)
+            resp = requests.post(API_URL, json={"text": query}, timeout=60)
             if resp.status_code == 200:
                 data = resp.json()
                 answer = data.get("answer", "No answer.")
@@ -22,50 +41,28 @@ if st.button("Ask"):
                 # --- Display sections ---
                 st.subheader("Chatbot Answer")
                 st.markdown(answer)
-                st.subheader("Summary")
-                st.write(structured.get("summary", "-"))
 
-                if structured.get("key_points"):
-                    st.subheader("Key Points")
-                    st.markdown("\n".join([f"- {pt}" for pt in structured["key_points"]]))
+                # Show summary only if it is non-empty and not a placeholder
+                summary = structured.get("summary", "").strip()
+                if summary and summary != "-" and len(summary) > 10:
+                    st.subheader("Summary")
+                    st.write(summary)
 
-                if structured.get("fund_details"):
-                    st.subheader("Fund Details")
-                    st.table(structured["fund_details"])  # dict to table
-
-                if structured.get("performance_data"):
-                    st.subheader("Performance Data")
-                    st.table(structured["performance_data"])  # dict to table
-
-                if structured.get("risk_metrics"):
-                    st.subheader("Risk Metrics")
-                    st.table(structured["risk_metrics"])  # dict to table
-
-                if structured.get("recommendations"):
-                    st.subheader("Recommendations")
-                    st.markdown("\n".join([f"- {rec}" for rec in structured["recommendations"]]))
-
-                if structured.get("sources"):
+                # Show sources if present and non-empty
+                sources = structured.get("sources")
+                if sources and isinstance(sources, list) and any(sources):
                     st.subheader("Sources")
-                    st.markdown("\n".join([f"- {src}" for src in structured["sources"]]))
+                    st.markdown("\n".join([f"- {src}" for src in sources if src and src != "-"]))
 
-                if structured.get("disclaimer"):
+                # Show disclaimer if present and non-empty
+                disclaimer = structured.get("disclaimer", "").strip()
+                if disclaimer and disclaimer != "-":
                     st.subheader("Disclaimer")
-                    st.info(structured["disclaimer"])
+                    st.info(disclaimer)
 
-                # Response quality
-                if quality:
-                    st.subheader("Response Quality")
-                    st.write(f"Overall Score: {quality.get('overall_score', '-')}/10")
-                    st.write(f"Accuracy: {quality.get('accuracy', '-')}/10")
-                    st.write(f"Completeness: {quality.get('completeness', '-')}/10")
-                    st.write(f"Clarity: {quality.get('clarity', '-')}/10")
-                    st.write(f"Relevance: {quality.get('relevance', '-')}/10")
-                    st.write(f"Feedback: {quality.get('feedback', '-')}")
+                # --- Hide all other sections unless they have real, non-placeholder data ---
+                # (No key points, fund details, performance data, risk metrics, recommendations, response quality, or raw JSON)
 
-                # Raw JSON for debugging
-                with st.expander("Show raw response JSON"):
-                    st.json(data)
             else:
                 st.error(f"API error: {resp.status_code}\n{resp.text}")
         except Exception as e:

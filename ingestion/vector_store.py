@@ -22,6 +22,34 @@ class VectorStore:
             name="mutual_fund_factsheets"
         )
 
+    def add_texts(self, texts: List[str], metadatas: List[Dict] = None):
+        """Add texts to the vector store with automatic embedding generation
+        
+        Args:
+            texts: List of text strings to add
+            metadatas: List of metadata dictionaries (optional)
+        """
+        if metadatas is None:
+            metadatas = [{} for _ in texts]
+        
+        # Generate unique IDs
+        ids = [f"text_{i}_{hash(text) % 1000000}" for i, text in enumerate(texts)]
+        
+        # Split into batches of 5000
+        batch_size = 5000
+        for i in range(0, len(ids), batch_size):
+            batch_ids = ids[i:i + batch_size]
+            batch_texts = texts[i:i + batch_size]
+            batch_metadatas = metadatas[i:i + batch_size]
+            
+            print(f"Adding batch {i//batch_size + 1}/{(len(ids) + batch_size - 1)//batch_size} ({len(batch_ids)} texts)")
+            
+            self.collection.add(
+                ids=batch_ids,
+                documents=batch_texts,
+                metadatas=batch_metadatas
+            )
+
     def add_documents(self, documents: List[Dict]):
         """Add processed documents to the vector store"""
         # Use provided IDs if available, otherwise generate unique ones

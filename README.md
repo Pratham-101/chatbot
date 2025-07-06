@@ -1,68 +1,32 @@
-# 🤖 Mutual Fund Chatbot
+## LLM Provider Configuration
 
-A production-ready mutual fund chatbot with multi-agent evaluation, real-time data integration, and ChatGPT-style responses.
+This chatbot supports both Groq (cloud, free, fast) and Ollama (local, private) as LLM backends for all agentic and RAG workflows. No OpenAI key is required.
 
-## 🚀 Features
+### To use Groq (default, recommended):
 
-- Multi-Agent Architecture
-- Real-time Data Integration
-- Quality Evaluation
-- Structured Responses
-- Production Ready
-- Modern UI
+1. Get a free Groq API key from https://console.groq.com/keys
+2. Set the following environment variables:
+   ```bash
+   export LLM_PROVIDER=groq
+   export GROQ_API_KEY=your-groq-key
+   export GROQ_MODEL=llama3-70b-8192  # or mixtral-8x7b-32768, gemma-7b-it, etc.
+   ```
+3. Start the backend as usual.
 
-## 🛠️ Quick Start
+### To use Ollama (local):
 
-```bash
-# Clone and setup
-git clone <repo-url>
-cd mutual-fund-chatbot
+1. Install Ollama from https://ollama.com/download and run a model, e.g.:
+   ```bash
+   ollama run llama3
+   ```
+2. Set the following environment variables:
+   ```bash
+   export LLM_PROVIDER=ollama
+   export OLLAMA_MODEL=llama3  # or mistral, phi, etc.
+   export OLLAMA_API_URL=http://127.0.0.1:11434/api/generate  # default
+   ```
+3. Start the backend as usual.
 
-# Install dependencies
-make install-dev
-
-# Set environment
-cp .env.example .env
-# Edit .env with your GROQ_API_KEY
-
-# Run
-make run-dev
-```
-
-## 📊 API Usage
-
-```bash
-# Health check
-curl http://localhost:8000/api/v1/health
-
-# Ask question
-curl -X POST http://localhost:8000/api/v1/query \n  -H "Content-Type: application/json" \n  -d '{"text": "Tell me about HDFC Defence Fund?"}'
-```
-
-## 🏗️ Architecture
-
-- **API Layer**: FastAPI with structured logging
-- **Services**: Multi-agent chatbot system
-- **Data**: Vector store + real-time web search
-- **LLM**: Groq integration with quality evaluation
-- **UI**: Streamlit interface
-
-## 📈 Production Features
-
-- Docker containerization
-- Health checks & monitoring
-- Rate limiting & security
-- Structured logging
-- CI/CD ready
-
-## 🤝 Contributing
-
-1. Fork the repository
-2. Create feature branch
-3. Make changes
-4. Add tests
-5. Submit PR
-
-## 📄 License
-
-MIT License
+### Switching Providers
+- Change the `LLM_PROVIDER` environment variable to `groq` or `ollama` as needed.
+- No code changes required. 

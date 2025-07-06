@@ -7,6 +7,8 @@ from datetime import datetime, timedelta
 from typing import Dict, List, Optional
 import os
 from bs4 import BeautifulSoup
+import feedparser
+from textblob import TextBlob
 
 class RealTimeDataProvider:
     """
@@ -234,6 +236,73 @@ class MarketDataProvider:
         except Exception as e:
             print(f"Error getting economic indicators: {e}")
             return {}
+    
+    async def get_fund_news(self, fund_name: str) -> List[Dict]:
+        """
+        Fetch latest news headlines/snippets for a fund from RSS feeds using keywords.
+        """
+        results = []
+        keywords = fund_name.split() if fund_name else []
+        for feed_url in self.news_sources:
+            try:
+                feed = feedparser.parse(feed_url)
+                for entry in feed.entries:
+                    title = entry.get('title', '')
+                    summary = entry.get('summary', '')
+                    link = entry.get('link', '')
+                    if any(kw.lower() in (title + summary).lower() for kw in keywords):
+                        results.append({
+                            'headline': title,
+                            'summary': summary,
+                            'link': link,
+                            'source': feed_url,
+                            'timestamp': entry.get('published', '')
+                        })
+            except Exception as e:
+                print(f"Error parsing feed {feed_url}: {e}")
+        return results[:10]
+    
+    async def get_regulatory_updates(self) -> List[Dict]:
+        """
+        Fetch latest SEBI/AMFI circulars/press releases from their RSS feeds or news pages.
+        """
+        updates = []
+        # SEBI and AMFI RSS feeds (official or news)
+        feeds = [
+            "https://www.sebi.gov.in/sebiweb/rss/circulars.xml",
+            "https://www.amfiindia.com/rss/press-releases.xml"
+        ]
+        for feed_url in feeds:
+            try:
+                feed = feedparser.parse(feed_url)
+                for entry in feed.entries:
+                    updates.append({
+                        'title': entry.get('title', ''),
+                        'summary': entry.get('summary', ''),
+                        'link': entry.get('link', ''),
+                        'source': feed_url,
+                        'timestamp': entry.get('published', '')
+                    })
+            except Exception as e:
+                print(f"Error parsing regulatory feed {feed_url}: {e}")
+        return updates[:10]
+    
+    def analyze_sentiment(self, texts: List[str]) -> str:
+        """
+        Analyze sentiment of a list of texts using TextBlob. Returns 'positive', 'neutral', or 'negative'.
+        """
+        if not texts:
+            return 'neutral'
+        scores = [TextBlob(t).sentiment.polarity for t in texts if t]
+        if not scores:
+            return 'neutral'
+        avg = sum(scores) / len(scores)
+        if avg > 0.1:
+            return 'positive'
+        elif avg < -0.1:
+            return 'negative'
+        else:
+            return 'neutral'
 
 # Global instances
 real_time_provider = RealTimeDataProvider()

@@ -24,3 +24,4 @@ google-cloud-storage
 aiohttp
 pandas
 beautifulsoup4
+feedparser

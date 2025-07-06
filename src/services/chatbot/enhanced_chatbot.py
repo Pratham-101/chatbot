@@ -7,6 +7,9 @@ from typing import List, Dict, Optional
 import httpx
 from duckduckgo_search import DDGS
 from groq import Groq, APIError
+import threading
+import datetime
+import logging
 
 from ingestion.vector_store import VectorStore
 from chatbot.real_time_data import real_time_provider, market_data_provider
@@ -14,6 +17,8 @@ from chatbot.response_quality import response_evaluator, structured_generator, R
 import spacy
 from chatbot.knowledge_graph import MutualFundKnowledgeGraph
 from chatbot.web_search import WebSearch
+from ingestion.structured_data_loader import StructuredDataLoader
+from pipeline import MutualFundPipeline
 
 # --- Start of GroqClient Definition ---
 class GroqClient:
@@ -76,6 +81,31 @@ except OSError:
     download("en_core_web_sm")
     nlp = spacy.load("en_core_web_sm")
 
+USER_SESSION_FILE = "user_sessions.json"
+USER_SESSION_LOCK = threading.Lock()
+
+def load_user_session(user_id: str) -> dict:
+    if not os.path.exists(USER_SESSION_FILE):
+        return {}
+    with USER_SESSION_LOCK, open(USER_SESSION_FILE, "r", encoding="utf-8") as f:
+        try:
+            sessions = json.load(f)
+        except Exception:
+            return {}
+    return sessions.get(user_id, {})
+
+def save_user_session(user_id: str, session: dict):
+    sessions = {}
+    if os.path.exists(USER_SESSION_FILE):
+        with USER_SESSION_LOCK, open(USER_SESSION_FILE, "r", encoding="utf-8") as f:
+            try:
+                sessions = json.load(f)
+            except Exception:
+                sessions = {}
+    sessions[user_id] = session
+    with USER_SESSION_LOCK, open(USER_SESSION_FILE, "w", encoding="utf-8") as f:
+        json.dump(sessions, f, indent=2)
+
 class EnhancedMutualFundChatbot:
     """
     A chatbot that answers queries about mutual funds by combining information
@@ -83,9 +113,11 @@ class EnhancedMutualFundChatbot:
     """
     def __init__(self, model_name="llama3-8b-8192"):
         self.client = GroqClient(model=model_name)
+        self.pipeline = MutualFundPipeline()
         self.vector_store: Optional[VectorStore] = None
         self.web_search_tool = None 
         self.knowledge_graph = MutualFundKnowledgeGraph()
+        self.structured_data_loader = StructuredDataLoader()
 
     def set_vector_store(self, vector_store: VectorStore):
         self.vector_store = vector_store
@@ -184,133 +216,327 @@ class EnhancedMutualFundChatbot:
         
         return real_time_data
 
-    async def process_query(self, query: str) -> str:
+    async def process_query(self, query: str, user_id: str = "default") -> dict:
         """
         Processes a query by combining factsheet data, web search, and real-time data.
+        Loads and updates user session context in user_sessions.json.
+        Returns a dict with both the full LLM answer and the formatted/structured response.
+        Adds proactive market alerts if significant NAV/news changes are detected.
+        Adds a dynamic follow-up suggestion based on the answer and context.
         """
-        print(f"[Chatbot] Processing query: '{query}'")
-        
-        # Step 1: Extract key topics/fund names from the query for targeted searches.
+        print(f"[Chatbot] Processing query: '{query}' for user {user_id}")
+        session = load_user_session(user_id)
+        last_fund = session.get("last_fund")
         fund_keywords = re.findall(r'(HDFC.*?Fund|ICICI.*?Fund|SBI.*?Fund|Kotak.*?Fund|Nippon.*?Fund)', query, re.IGNORECASE)
-        if not fund_keywords:
+        if not fund_keywords and last_fund:
+            fund_keywords = [last_fund]
+        elif not fund_keywords:
             fund_keywords = [query]
-        
         print(f"Extracted search keywords: {fund_keywords}")
-
-        # Step 1.5: Try knowledge graph first for direct fund details
-        kg_fund_data = None
+        # Update session with last fund
+        if fund_keywords:
+            session["last_fund"] = fund_keywords[0]
+        # Store question history
+        history = session.get("history", [])
+        history.append({
+            "question": query,
+            "timestamp": datetime.datetime.now().isoformat()
+        })
+        session["history"] = history
+        # Structured data lookup for each fund
+        structured_facts = {}
         for fund in fund_keywords:
-            kg_fund_data = self.knowledge_graph.get_fund(fund)
-            if kg_fund_data:
-                print(f"Found fund in knowledge graph: {fund}")
+            fund_data = self.structured_data_loader.get_fund_data(fund)
+            if fund_data:
+                structured_facts[fund] = fund_data
+        # Try to answer directly from structured data for key questions
+        direct_answer = None
+        for fund, records in structured_facts.items():
+            # Fund manager: find all managers with the most recent 'since' date
+            if "fund manager" in query.lower():
+                all_managers = []
+                for r in records:
+                    if isinstance(r.get("fund_manager"), list):
+                        all_managers.extend(r["fund_manager"])
+                # Parse dates and find the most recent
+                date_manager_map = {}
+                for mgr in all_managers:
+                    since_str = mgr.get("since")
+                    try:
+                        since_date = datetime.datetime.strptime(since_str, "%B %d, %Y").date()
+                    except Exception:
+                        try:
+                            since_date = datetime.datetime.strptime(since_str, "%d-%m-%Y").date()
+                        except Exception:
+                            since_date = since_str  # fallback to string
+                    date_manager_map.setdefault(since_date, []).append(mgr)
+                # Find the most recent date (if any)
+                if date_manager_map:
+                    latest_date = max([d for d in date_manager_map if isinstance(d, datetime.date)], default=None)
+                    if latest_date:
+                        managers = date_manager_map[latest_date]
+                        names = ", ".join([m["name"] for m in managers if m["name"]])
+                        direct_answer = f"The current fund manager(s) for {fund} as of {latest_date.strftime('%B %d, %Y')} are: {names}."
+                    else:
+                        # fallback: just list all names
+                        names = ", ".join([m["name"] for m in all_managers if m["name"]])
+                        direct_answer = f"The fund manager(s) for {fund} are: {names}."
                 break
-        if kg_fund_data:
-            response = self._format_kg_response(kg_fund_data, query)
-            return response
-
-        # Step 2: Try web search attribute extraction and update knowledge graph
-        web_search = WebSearch()
-        for fund in fund_keywords:
-            web_attrs = await web_search.search_and_extract_attributes(fund)
-            if web_attrs and len(web_attrs) > 1:
-                print(f"Extracted attributes from web for {fund}: {web_attrs}")
-                self.knowledge_graph.update_fund(fund, web_attrs)
-                response = self._format_kg_response(web_attrs, query)
-                return response
-
-        # Step 3: Get data from all sources concurrently
-        factsheet_task = asyncio.create_task(self._get_factsheet_context(query))
+            elif "aum" in query.lower():
+                for r in records:
+                    if r.get("aum"):
+                        direct_answer = f"The AUM of {fund} is {r['aum']} (from factsheet)."
+                        break
+            elif "nav" in query.lower():
+                for r in records:
+                    if r.get("nav"):
+                        direct_answer = f"The latest NAV of {fund} is {r['nav']} (from factsheet)."
+                        break
+            # Add more direct lookups as needed
+            if direct_answer:
+                break
+        if direct_answer:
+            return {
+                "full_answer": direct_answer,
+                "quality_metrics": {"accuracy": 10, "completeness": 10, "clarity": 10, "relevance": 10, "feedback": "Answered directly from structured factsheet data."},
+                "structured_data": structured_facts
+            }
+        # --- Proactive Market Alert Logic ---
+        market_alerts = []
+        tracked_funds = session.get("tracked_funds", fund_keywords)
+        last_navs = session.get("last_navs", {})
+        # --- Use pipeline for retrieval instead of self._get_factsheet_context ---
+        factsheet_context = await asyncio.to_thread(self.pipeline.retrieve, query, 5)
         web_search_tasks = [self._perform_web_search(keyword) for keyword in fund_keywords]
         real_time_task = asyncio.create_task(self._get_real_time_data(query))
-        
-        # Gather all results
         factsheet_context, *web_results, real_time_data = await asyncio.gather(
-            factsheet_task, *web_search_tasks, real_time_task
+            asyncio.create_task(asyncio.to_thread(self.pipeline.retrieve, query, 5)),
+            *web_search_tasks,
+            real_time_task
         )
-        
-        web_results_str = "\n\n".join(web_results)
-
-        # Step 4: Build the prompt for the LLM
+        # Check NAV changes
+        if real_time_data.get('fund_nav'):
+            for nav_info in real_time_data['fund_nav']:
+                fund = nav_info['fund_name']
+                nav = nav_info['nav']
+                prev_nav = last_navs.get(fund)
+                if prev_nav:
+                    try:
+                        nav_float = float(str(nav).replace(',', ''))
+                        prev_nav_float = float(str(prev_nav).replace(',', ''))
+                        if prev_nav_float > 0:
+                            change_pct = 100 * (nav_float - prev_nav_float) / prev_nav_float
+                            if abs(change_pct) >= 5:
+                                alert = f"⚠️ NAV Alert: {fund} NAV changed by {change_pct:.2f}% since your last check. (Prev: ₹{prev_nav}, Now: ₹{nav})"
+                                market_alerts.append(alert)
+                    except Exception:
+                        pass
+                last_navs[fund] = nav
+        session["last_navs"] = last_navs
+        last_news = session.get("last_news", "")
+        latest_news = ""
+        if real_time_data.get('market_indices') and 'last_updated' in real_time_data['market_indices']:
+            latest_news = real_time_data['market_indices']['last_updated']
+        if real_time_data.get('fund_performance') and len(real_time_data['fund_performance']) > 0:
+            latest_news = real_time_data['fund_performance'][0].get('last_updated', latest_news)
+        if latest_news and latest_news != last_news:
+            alert = f"📰 Market Update: New market data available as of {latest_news}."
+            market_alerts.append(alert)
+            session["last_news"] = latest_news
+        save_user_session(user_id, session)
+        # --- Advanced Real-Time News, Sentiment, and Regulatory Updates ---
+        # 1. Fetch latest fund news and analyze sentiment
+        fund_news = []
+        news_sentiment = 'neutral'
+        if fund_keywords:
+            fund_news = await real_time_provider.get_fund_news(fund_keywords[0])
+            news_headlines = [n['headline'] for n in fund_news]
+            news_sentiment = real_time_provider.analyze_sentiment(news_headlines)
+        # 2. Fetch latest regulatory updates
+        regulatory_updates = await market_data_provider.get_regulatory_updates()
+        last_reg_update_time = session.get('last_reg_update_time', '')
+        new_reg_alerts = []
+        latest_reg_time = last_reg_update_time
+        for update in regulatory_updates:
+            ts = update.get('timestamp') or update.get('published', '')
+            if ts and ts > last_reg_update_time:
+                new_reg_alerts.append(update)
+                if not latest_reg_time or ts > latest_reg_time:
+                    latest_reg_time = ts
+        if latest_reg_time:
+            session['last_reg_update_time'] = latest_reg_time
+        # Add regulatory alerts to market_alerts
+        for alert in new_reg_alerts:
+            market_alerts.append(f"📢 Regulatory Update: {alert.get('title')} ({alert.get('link')})")
+        # Save session after update (again, to persist reg update time)
+        save_user_session(user_id, session)
+        # 3. Summarize news for answer (use LLM if available, else simple join)
+        news_summary = ''
+        if fund_news:
+            if self.llm_available():
+                news_text = '\n'.join([f"- {n['headline']}: {n['summary']}" for n in fund_news])
+                news_prompt = f"Summarize the following latest news for {fund_keywords[0]} in 2-3 sentences for an investor:\n{news_text}"
+                news_summary = await self.client.generate(news_prompt)
+            else:
+                news_summary = '\n'.join([f"- {n['headline']}: {n['summary']}" for n in fund_news])
+        # 4. Summarize regulatory updates (use LLM if available, else simple join)
+        reg_summary = ''
+        if new_reg_alerts:
+            if self.llm_available():
+                reg_text = '\n'.join([f"- {r['title']}: {r['summary']}" for r in new_reg_alerts])
+                reg_prompt = f"Summarize the following new regulatory updates for mutual fund investors in 1-2 sentences:\n{reg_text}"
+                reg_summary = await self.client.generate(reg_prompt)
+            else:
+                reg_summary = '\n'.join([f"- {r['title']}: {r['summary']}" for r in new_reg_alerts])
+        # --- End Advanced Real-Time News, Sentiment, and Regulatory Updates ---
+        # --- Advanced Top Funds Table Synthesis (no hardcoding) ---
+        import re
+        def extract_fund_rows(contexts):
+            fund_rows = []
+            seen = set()
+            # Try to extract rows like: Fund Name, Return, AUM, Category, Link
+            fund_pattern = re.compile(r"([A-Za-z0-9 &\-\.]+?)(?: Fund| Scheme| Plan)?[\s\-:|]+([\d.]+%)[\s\-:|]+([A-Za-z]+)?[\s\-:|]+([\d,]+ ?[Cc]r|[\d,]+ ?[Mm]n|[\d,]+ ?[Ll]akh)?", re.IGNORECASE)
+            link_pattern = re.compile(r"https?://[\w./\-_%?=&]+")
+            for chunk in contexts:
+                # Extract links
+                links = link_pattern.findall(chunk)
+                # Extract fund rows
+                for match in fund_pattern.finditer(chunk):
+                    name, ret, cat, aum = match.groups()
+                    key = (name.strip(), ret.strip(), aum.strip() if aum else '', cat.strip() if cat else '')
+                    if key not in seen:
+                        fund_rows.append({
+                            'name': name.strip(),
+                            'return': ret.strip(),
+                            'category': cat.strip() if cat else '',
+                            'aum': aum.strip() if aum else '',
+                            'link': links[0] if links else ''
+                        })
+                        seen.add(key)
+            return fund_rows
+        # Gather all context for parsing
+        all_context = []
+        if factsheet_context: all_context.append(factsheet_context)
+        if web_results: all_context.append(web_results)
+        if news_summary: all_context.append(news_summary)
+        # Extract fund rows
+        fund_rows = extract_fund_rows(all_context)
+        logging.info("[DEBUG] Parsed fund rows: %s", fund_rows)
+        # Synthesize markdown table if enough rows
+        def synthesize_fund_table(rows):
+            if not rows:
+                return ''
+            table = "| Fund Name | Return | Category | AUM | Source Link |\n|---|---|---|---|---|\n"
+            for r in rows:
+                link = f"[{r['name']}]({r['link']})" if r['link'] else r['name']
+                table += f"| {link} | {r['return']} | {r['category']} | {r['aum']} | {r['link']} |\n"
+            return table
+        fund_table = synthesize_fund_table(fund_rows)
+        # --- End Advanced Top Funds Table Synthesis ---
+        # --- BEGIN: General, Modular, ChatGPT-like Prompt Engineering ---
         factsheet_str = "\n\n".join(factsheet_context) if factsheet_context else "No specific 2025 factsheet data was found in the local documents."
-        
-        # Format real-time data
+        web_results_str = "\n\n".join([r if isinstance(r, str) else json.dumps(r) for r in web_results]) if web_results else "No relevant web results found."
         real_time_str = self._format_real_time_data(real_time_data)
-        
-        prompt = f"""
-        You are an expert mutual fund advisor. Your task is to provide a comprehensive answer to the user's query by synthesizing information from three sources: internal documents (2025 factsheets), real-time web search results, and live market data.
 
-        User Query: "{query}"
+        prompt = f'''
+You are an expert financial advisor. Using ONLY the provided context, answer the user's question in a detailed, actionable, and user-friendly way.
 
-        ====================
-        Source 1: Internal Factsheet Data (Year 2025)
-        ---
-        {factsheet_str}
-        ---
-        ====================
-        Source 2: Real-Time Web Search Results (Current Data)
-        ---
-        {web_results_str}
-        ---
-        ====================
-        Source 3: Live Market Data (Real-Time)
-        ---
-        {real_time_str}
-        ---
-        ====================
+User's Question: {query}
 
-        Instructions:
-        1. Synthesize a single, coherent answer from ALL three sources above.
-        2. Prioritize real-time data for current NAV, market indices, and live performance.
-        3. Use factsheet data for fund details, objectives, and historical context.
-        4. Use web search results for latest news, analysis, and market commentary.
-        5. Clearly indicate the source and timestamp of real-time data.
-        6. If the sources conflict, prioritize real-time data over historical data.
-        7. Structure the response with clear headings, bullet points, and tables.
-        8. Include relevant market context and economic indicators if applicable.
+Context:
+{factsheet_str}
+{web_results_str}
+{real_time_str}
 
-        Provide a comprehensive and helpful response now.
-        """
-        
-        print("Generating synthesized response...")
+Instructions:
+- Use all available data to answer the question as completely as possible.
+- If the question asks for a list, comparison, or ranking, present the data in a markdown table if possible.
+- If the question is about performance, risk, or returns, provide numbers, trends, and cite sources inline (e.g., [Moneycontrol](...)).
+- If the question is about recommendations, provide actionable advice and highlight risks or considerations.
+- If data is missing, say so, but still provide as much as possible (e.g., "Based on the latest available data, here's what we know...").
+- Use markdown formatting, bullet points, and clear language.
+- Use chain-of-thought reasoning: break down your answer step by step, and synthesize across all sources.
+- If the context contains partial or conflicting data, explain the limitations and provide the best possible synthesis.
+- Always be transparent about the sources and limitations of the data.
+'''
+        # --- END: General, Modular, ChatGPT-like Prompt Engineering ---
+
+        # --- LLM answer generation ---
         raw_response = await self.client.generate(prompt)
-        
-        # Step 5: Evaluate response quality
+        logging.info("[DEBUG] LLM raw output: %s", raw_response[:2000])
+        # Fallback strict mode: synthesize table/summary if answer is too generic or missing a table for 'top funds' queries
+        is_top_funds_query = any(kw in query.lower() for kw in ["top funds", "best funds", "top 10", "top ten", "top performers"])
+        if is_generic_answer(raw_response) or (is_top_funds_query and len(fund_rows) >= 2 and '| Fund Name |' not in raw_response):
+            table = fund_table if fund_table else ''
+            if factsheet_str.strip():
+                table += f"\n\n**Factsheet Data Table:**\n{factsheet_str}"
+            if web_results_str.strip():
+                table += f"\n\n**Web Data Table:**\n{web_results_str}"
+            if news_summary.strip():
+                table += f"\n\n**News Summary:**\n{news_summary}"
+            if reg_summary.strip():
+                table += f"\n\n**Regulatory Updates:**\n{reg_summary}"
+            raw_response += table + "\n\n_Note: This answer was auto-synthesized from real data due to lack of LLM detail or table._"
+            final_response = raw_response
+        else:
+            final_response = raw_response
+        # --- End LLM answer generation ---
         print("Evaluating response quality...")
-        context_for_evaluation = f"Factsheet: {factsheet_str[:500]}... Web: {web_results_str[:500]}... Real-time: {real_time_str[:500]}..."
-        quality_metrics = await response_evaluator.evaluate_response(query, context_for_evaluation, raw_response)
-        
-        # Step 6: Generate structured response
+        # --- Use pipeline for evaluation instead of old evaluator ---
+        quality_metrics = self.pipeline.evaluate(raw_response, query)
         print("Generating structured response...")
         structured_response = await structured_generator.generate_structured_response(
             query, raw_response, real_time_data
         )
-        
-        # Step 7: Format final response with quality metrics
+        print("Formatting final response...")
         final_response = self._format_final_response(
             structured_response, quality_metrics, raw_response
         )
-        
-        context_chunks = []
-        if factsheet_context:
-            context_chunks.append(str(factsheet_context))
-        if web_results:
-            for r in web_results:
-                if isinstance(r, dict):
-                    if r.get('snippet'):
-                        context_chunks.append(r.get('snippet', ''))
-                elif isinstance(r, str):
-                    context_chunks.append(r)
-        if real_time_data:
-            context_chunks.append(str(real_time_data))
-        if self.llm_available():
-            # Use LLM to generate a full, conversational answer
-            if asyncio.iscoroutinefunction(self.generate_llm_answer):
-                return await self.generate_llm_answer(query, context_chunks, web_results, real_time_data)
-            else:
-                return self.generate_llm_answer(query, context_chunks, web_results, real_time_data)
-        else:
-            # Use fallback synthesis
-            return self.synthesize_fallback_answer(fund_name, factsheet_context, web_results, real_time_data)
+        # --- Dynamic Follow-Up Suggestion ---
+        follow_up_prompt = f"Given the user's question: '{query}' and the following answer: '{raw_response}', suggest a highly relevant, concise follow-up question or next step the user might want to ask. Respond with only the follow-up suggestion."
+        follow_up_suggestion = await self.client.generate(follow_up_prompt)
+
+        # --- Advanced Source Link Post-Processing ---
+        # Collect all unique (title, href) pairs from web_results
+        sources_links = []
+        seen_links = set()
+        for r in web_results:
+            if isinstance(r, dict) and r.get('href'):
+                title = r.get('title', 'Source')
+                href = r['href']
+                key = (title.strip(), href.strip())
+                if href and key not in seen_links:
+                    sources_links.append(f"- [{title}]({href})")
+                    seen_links.add(key)
+        # Always append sources section, even if LLM already outputs one
+        if sources_links:
+            sources_section = "\n\n**Sources:**\n" + "\n".join(sources_links)
+            import re
+            # Remove any existing 'Sources' section (case-insensitive, markdown or plain)
+            raw_response = re.sub(r"\*\*Sources\*\*:(.|\n)*", '', raw_response, flags=re.IGNORECASE)
+            raw_response = re.sub(r"Sources:(.|\n)*", '', raw_response, flags=re.IGNORECASE)
+            final_response = re.sub(r"\*\*Sources\*\*:(.|\n)*", '', final_response, flags=re.IGNORECASE)
+            final_response = re.sub(r"Sources:(.|\n)*", '', final_response, flags=re.IGNORECASE)
+            raw_response = raw_response.strip() + sources_section
+            final_response = final_response.strip() + sources_section
+        # Also add to structured_data for UI
+        if structured_response and hasattr(structured_response, 'sources'):
+            structured_response.sources = sources_links
+        elif isinstance(structured_response, dict):
+            structured_response['sources'] = sources_links
+        # Add news, sentiment, and regulatory info to returned dict for UI
+        return {
+            "full_answer": raw_response,
+            "formatted_answer": final_response,
+            "quality_metrics": quality_metrics,
+            "structured_data": structured_response,
+            "raw_response": raw_response,
+            "market_alerts": market_alerts,
+            "follow_up_suggestion": follow_up_suggestion.strip() if follow_up_suggestion else None,
+            "news": fund_news,
+            "news_sentiment": news_sentiment,
+            "regulatory_updates": new_reg_alerts
+        }
 
     def _format_real_time_data(self, real_time_data: Dict) -> str:
         """
@@ -513,12 +739,10 @@ class EnhancedMutualFundChatbot:
         return deduped_factsheet, deduped_web
 
     def _extract_all_attributes(self, factsheet_chunks, web_results):
-        """Extract key metrics from factsheet and web snippets."""
+        """Extract key metrics from factsheet and web snippets, with robust top holdings extraction."""
         ws = WebSearch()
-        # From web
         web_snippets = [r.get('snippet', '') if isinstance(r, dict) else r for r in web_results or []]
         web_attrs = ws.extract_fund_attributes(web_snippets)
-        # From factsheet (simple regex/heuristics)
         factsheet_text = ' '.join(factsheet_chunks or [])
         attrs = dict(web_attrs)
         import re
@@ -529,12 +753,45 @@ class EnhancedMutualFundChatbot:
             'expense_ratio': r'Expense Ratio[:\s]+([\d.]+%)',
             'risk': r'Risk[:\s]+([A-Za-z ]+)',
             'fund_manager': r'Fund Manager[s]?: ([A-Za-z ,.]+)',
-            'top_holdings': r'Top Holdings?: ([A-Za-z0-9, &]+)',
         }
         for key, pat in patterns.items():
             match = re.search(pat, factsheet_text, re.IGNORECASE)
             if match:
                 attrs[key] = match.group(1).strip()
+        # --- Robust Top Holdings Extraction ---
+        holdings = []
+        # 1. Look for a Top Holdings section/table
+        holdings_section = re.search(r"Top Holdings?:?\s*([\s\S]{0,500})", factsheet_text, re.IGNORECASE)
+        if holdings_section:
+            section = holdings_section.group(1)
+            # Try to extract lines that look like holdings (company + % or just company)
+            lines = section.split('\n')
+            for line in lines:
+                line = line.strip()
+                if not line:
+                    continue
+                # Match lines like '1. Reliance Industries 8.5%' or 'Reliance Industries - 8.5%' or just 'Reliance Industries'
+                m = re.match(r"(?:\d+\.\s*)?([A-Za-z0-9 &\-\.]+)(?:\s*[-:]?\s*([\d.]+%)?)?", line)
+                if m and m.group(1):
+                    holding = m.group(1).strip()
+                    if holding and holding.lower() not in [h.lower() for h in holdings]:
+                        holdings.append(holding)
+                if len(holdings) >= 10:
+                    break
+        # 2. Fallback: Use NER to extract ORG entities from the section
+        if not holdings and holdings_section:
+            try:
+                doc = nlp(holdings_section.group(1))
+                for ent in doc.ents:
+                    if ent.label_ == "ORG" and ent.text not in holdings:
+                        holdings.append(ent.text)
+            except Exception:
+                pass
+        # 3. Fallback: Use web attributes if available
+        if not holdings and web_attrs.get('top_holdings'):
+            holdings = [h.strip() for h in re.split(r',|;', web_attrs['top_holdings']) if h.strip()]
+        if holdings:
+            attrs['top_holdings'] = ', '.join(holdings[:10])
         return attrs
 
     def _format_key_metrics(self, attrs):
@@ -689,3 +946,14 @@ Now generate the answer as described above.
     def llm_available(self):
         """Check if the LLM is available."""
         return self.client is not None 
+
+# Test entry point
+if __name__ == "__main__":
+    import asyncio
+    chatbot = EnhancedMutualFundChatbot()
+    query = "Who is the fund manager of HDFC Defence Fund?"
+    result = asyncio.run(chatbot.process_query(query))
+    print("\n===== Chatbot Result =====")
+    print(result["formatted_answer"])
+    print("\nRaw Answer:", result["full_answer"])
+    print("\nQuality Metrics:", result["quality_metrics"]) 

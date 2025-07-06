@@ -224,53 +224,66 @@ class StructuredResponseGenerator:
         """
         Fallback structured response when API is unavailable
         """
+        # Only include summary and sources if present
+        summary = raw_response[:200] + "..." if len(raw_response) > 200 else raw_response
         return StructuredResponse(
-            summary=raw_response[:200] + "..." if len(raw_response) > 200 else raw_response,
-            key_points=["Information extracted from response"],
-            fund_details={"name": "Fund details unavailable"},
-            performance_data={"returns": "Performance data unavailable"},
-            risk_metrics={"risk_level": "Risk assessment unavailable"},
-            recommendations=["Consult a financial advisor for personalized advice"],
-            sources=["Response generated from available data"],
-            disclaimer="Past performance does not guarantee future results. Please consult a financial advisor."
+            summary=summary,
+            key_points=[],
+            fund_details={},
+            performance_data={},
+            risk_metrics={},
+            recommendations=[],
+            sources=[],
+            disclaimer=""
         )
 
     def format_structured_response(self, structured_response: StructuredResponse) -> str:
         """
         Format structured response into readable plain text (no markdown, no emojis)
         """
-        formatted = f"{structured_response.summary}\n\n"
+        formatted = f"{structured_response.summary}\n\n" if structured_response.summary else ""
         if structured_response.key_points:
             formatted += "Key Points:\n"
             for point in structured_response.key_points:
-                formatted += f"  - {point}\n"
+                if point and point.lower() not in ["information extracted from response"]:
+                    formatted += f"  - {point}\n"
             formatted += "\n"
         if structured_response.fund_details:
-            formatted += "Fund Details:\n"
-            for key, value in structured_response.fund_details.items():
-                formatted += f"  {key.replace('_', ' ').title()}: {value}\n"
-            formatted += "\n"
+            filtered_fund_details = {k: v for k, v in structured_response.fund_details.items() if v and v.lower() not in ["fund details unavailable"]}
+            if filtered_fund_details:
+                formatted += "Fund Details:\n"
+                for key, value in filtered_fund_details.items():
+                    formatted += f"  {key.replace('_', ' ').title()}: {value}\n"
+                formatted += "\n"
         if structured_response.performance_data:
-            formatted += "Performance Data:\n"
-            for key, value in structured_response.performance_data.items():
-                formatted += f"  {key.replace('_', ' ').title()}: {value}\n"
-            formatted += "\n"
+            filtered_perf = {k: v for k, v in structured_response.performance_data.items() if v and v.lower() not in ["performance data unavailable"]}
+            if filtered_perf:
+                formatted += "Performance Data:\n"
+                for key, value in filtered_perf.items():
+                    formatted += f"  {key.replace('_', ' ').title()}: {value}\n"
+                formatted += "\n"
         if structured_response.risk_metrics:
-            formatted += "Risk Metrics:\n"
-            for key, value in structured_response.risk_metrics.items():
-                formatted += f"  {key.replace('_', ' ').title()}: {value}\n"
-            formatted += "\n"
+            filtered_risk = {k: v for k, v in structured_response.risk_metrics.items() if v and v.lower() not in ["risk assessment unavailable"]}
+            if filtered_risk:
+                formatted += "Risk Metrics:\n"
+                for key, value in filtered_risk.items():
+                    formatted += f"  {key.replace('_', ' ').title()}: {value}\n"
+                formatted += "\n"
         if structured_response.recommendations:
-            formatted += "Recommendations:\n"
-            for rec in structured_response.recommendations:
-                formatted += f"  - {rec}\n"
-            formatted += "\n"
+            filtered_recs = [rec for rec in structured_response.recommendations if rec and rec.lower() not in ["consult a financial advisor for personalized advice"]]
+            if filtered_recs:
+                formatted += "Recommendations:\n"
+                for rec in filtered_recs:
+                    formatted += f"  - {rec}\n"
+                formatted += "\n"
         if structured_response.sources:
-            formatted += "Sources:\n"
-            for source in structured_response.sources:
-                formatted += f"  - {source}\n"
-            formatted += "\n"
-        if structured_response.disclaimer:
+            filtered_sources = [source for source in structured_response.sources if source and source.lower() not in ["response generated from available data"]]
+            if filtered_sources:
+                formatted += "Sources:\n"
+                for source in filtered_sources:
+                    formatted += f"  - {source}\n"
+                formatted += "\n"
+        if structured_response.disclaimer and structured_response.disclaimer.lower() not in ["past performance does not guarantee future results. please consult a financial advisor.", "standard disclaimer applies."]:
             formatted += f"Disclaimer:\n  {structured_response.disclaimer}\n"
         return formatted.strip()
 

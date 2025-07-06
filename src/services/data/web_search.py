@@ -178,6 +178,7 @@ class WebSearch:
     def extract_fund_attributes(self, snippets: list) -> dict:
         """
         Extract fund attributes (manager, AUM, inception, etc.) from web snippets using regex and NER.
+        Now also robustly extract top holdings from tables/lists/NER.
         """
         attributes = {}
         text = " ".join(snippets)
@@ -195,15 +196,40 @@ class WebSearch:
             match = re.search(pat, text, re.IGNORECASE)
             if match:
                 attributes[key] = match.group(1).strip()
-        # Use spaCy NER for organization, date, money
-        doc = self._nlp(text)
-        for ent in doc.ents:
-            if ent.label_ == "ORG" and 'fund_name' not in attributes:
-                attributes['fund_name'] = ent.text
-            if ent.label_ == "MONEY" and 'aum' not in attributes:
-                attributes['aum'] = ent.text
-            if ent.label_ == "DATE" and 'inception_date' not in attributes:
-                attributes['inception_date'] = ent.text
+        # --- Robust Top Holdings Extraction from Web ---
+        holdings = []
+        # 1. Look for a Top Holdings section/table
+        holdings_section = re.search(r"Top Holdings?:?\s*([\s\S]{0,500})", text, re.IGNORECASE)
+        if holdings_section:
+            section = holdings_section.group(1)
+            lines = section.split('\n')
+            for line in lines:
+                line = line.strip()
+                if not line:
+                    continue
+                m = re.match(r"(?:\d+\.\s*)?([A-Za-z0-9 &\-\.]+)(?:\s*[-:]?\s*([\d.]+%)?)?", line)
+                if m and m.group(1):
+                    holding = m.group(1).strip()
+                    if holding and holding.lower() not in [h.lower() for h in holdings]:
+                        holdings.append(holding)
+                if len(holdings) >= 10:
+                    break
+        # 2. Fallback: Use NER to extract ORG entities from the section
+        if not holdings and holdings_section:
+            try:
+                doc = self._nlp(holdings_section.group(1))
+                for ent in doc.ents:
+                    if ent.label_ == "ORG" and ent.text not in holdings:
+                        holdings.append(ent.text)
+            except Exception:
+                pass
+        # 3. Fallback: Try comma/semicolon separated list in text
+        if not holdings:
+            m = re.search(r"Top Holdings?:?\s*([A-Za-z0-9, &;\-]+)", text, re.IGNORECASE)
+            if m:
+                holdings = [h.strip() for h in re.split(r',|;', m.group(1)) if h.strip()]
+        if holdings:
+            attributes['top_holdings'] = ', '.join(holdings[:10])
         return attributes
 
     async def search_and_extract_attributes(self, query: str, max_results: int = 5) -> dict:

@@ -6,6 +6,7 @@ from ingestion.vector_store import VectorStore
 import os
 import gc
 import traceback
+from dotenv import load_dotenv
 
 # --- GCP Service Account Key for Render ---
 if "GOOGLE_APPLICATION_CREDENTIALS_JSON" in os.environ:
@@ -96,44 +97,37 @@ async def ask_question(request: QueryRequest):
     """
     try:
         start_time = asyncio.get_event_loop().time()
-        answer = await chatbot.process_query(request.text)
+        answer_dict = await chatbot.process_query(request.text)
         end_time = asyncio.get_event_loop().time()
         
         # Force garbage collection after each query to free memory
         gc.collect()
         
-        if not answer:
+        if not answer_dict:
             raise HTTPException(status_code=500, detail="Failed to generate a response.")
         
         # Extract quality metrics and structured data from the response
-        # For now, we'll return placeholder data - in a full implementation,
-        # these would be extracted from the chatbot's response
-        quality_metrics = QualityMetrics(
-            accuracy=8.5,
-            completeness=8.0,
-            clarity=9.0,
-            relevance=8.5,
-            overall_score=8.5,
-            feedback="Response provides comprehensive information with good structure and clarity."
-        )
+        quality_metrics = answer_dict.get("quality_metrics")
+        if hasattr(quality_metrics, "dict"):
+            quality_metrics = quality_metrics.dict()
+        elif hasattr(quality_metrics, "__dict__"):
+            quality_metrics = dict(quality_metrics.__dict__)
+
+        structured_data = answer_dict.get("structured_data")
+        if hasattr(structured_data, "dict"):
+            structured_data = structured_data.dict()
+        elif hasattr(structured_data, "__dict__"):
+            structured_data = dict(structured_data.__dict__)
+
+        # Use the string answer for both answer and raw_response
+        answer_str = answer_dict.get("full_answer", "")
         
-        structured_data = StructuredData(
-            summary="Fund analysis completed successfully",
-            key_points=["Key points extracted from response"],
-            fund_details={"name": "Fund details extracted"},
-            performance_data={"returns": "Performance data extracted"},
-            risk_metrics={"risk_level": "Risk assessment extracted"},
-            recommendations=["Recommendations extracted"],
-            sources=["Sources extracted"],
-            disclaimer="Standard disclaimer applies"
-        )
-            
         return QueryResponse(
-            answer=answer,
+            answer=answer_str,
             response_time=round(end_time - start_time, 2),
             quality_metrics=quality_metrics,
             structured_data=structured_data,
-            raw_response=answer  # For now, using the formatted response as raw
+            raw_response=answer_str  # Use the string answer
         )
     except Exception as e:
         print("[EXCEPTION] An error occurred during query processing:")
@@ -142,3 +136,5 @@ async def ask_question(request: QueryRequest):
         # Force garbage collection on error
         gc.collect()
         raise HTTPException(status_code=500, detail=str(e))
+
+load_dotenv()
