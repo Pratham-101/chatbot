@@ -2,7 +2,7 @@ import sys
 import os
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
-from ingestion.vector_store import VectorStore
+from src.ingestion.vector_store import VectorStore
 from sentence_transformers import SentenceTransformer
 
 def test_vector_store():

@@ -2,12 +2,12 @@ import httpx
 import asyncio
 import time
 from typing import List, Optional
-from chatbot.retrieval import Retriever
+from src.chatbot.retrieval import Retriever
 import httpx
 import time
 from textblob import TextBlob  # For sentiment analysis
-from ingestion.structured_data_loader import StructuredDataLoader
-from ingestion.structured_data_extractor import StructuredDataExtractor
+from src.ingestion.structured_data_loader import StructuredDataLoader
+from src.ingestion.structured_data_extractor import StructuredDataExtractor
 from datetime import datetime
 
 

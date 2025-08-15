@@ -1,37 +1,51 @@
 """Chat API routes."""
 
+import asyncio
 import time
 from typing import Any
+import json
 
-from fastapi import APIRouter, Depends, HTTPException, Request
-from fastapi.responses import JSONResponse
+from fastapi import APIRouter, Depends, Request, HTTPException
+from pydantic import BaseModel
 
-from ..models.schemas import QueryRequest, QueryResponse
-from ...core.exceptions import ValidationError
-from ...core.logging import get_logger, log_performance
-from ...services.chatbot.enhanced_chatbot import EnhancedChatbot
+from api.models.schemas import QueryRequest, QueryResponse
+from core.logging import get_logger
+from services.chatbot.enhanced_chatbot import EnhancedMutualFundChatbot
 
 router = APIRouter()
 logger = get_logger("api.chat")
 
 # Global chatbot instance (in production, this should be properly managed)
-chatbot: EnhancedChatbot | None = None
+chatbot: EnhancedMutualFundChatbot | None = None
 
 
-async def get_chatbot() -> EnhancedChatbot:
+async def get_chatbot() -> EnhancedMutualFundChatbot:
     """Get or create chatbot instance."""
     global chatbot
     if chatbot is None:
         logger.info("Initializing chatbot instance")
-        chatbot = EnhancedChatbot()
+        chatbot = EnhancedMutualFundChatbot()
     return chatbot
+
+
+def to_dict(obj):
+    if hasattr(obj, "model_dump"):
+        return obj.model_dump()
+    if hasattr(obj, "dict"):
+        return obj.dict()
+    if isinstance(obj, dict):
+        return obj
+    try:
+        return json.loads(json.dumps(obj, default=str))
+    except Exception:
+        return {}
 
 
 @router.post("/query", response_model=QueryResponse)
 async def ask_question(
     request: QueryRequest,
     req: Request,
-    chatbot_instance: EnhancedChatbot = Depends(get_chatbot),
+    chatbot_instance: EnhancedMutualFundChatbot = Depends(get_chatbot),
 ) -> QueryResponse:
     """
     Process a user query and return a comprehensive response.
@@ -63,22 +77,32 @@ async def ask_question(
         response_time = time.time() - start_time
         
         # Log performance
-        log_performance(
-            "query_processing",
-            response_time,
-            request_id=request_id,
-            query_length=len(request.text),
-        )
+        # log_performance( # This line was removed as per the new_code, as log_performance is no longer imported.
+        #     "query_processing",
+        #     response_time,
+        #     request_id=request_id,
+        #     query_length=len(request.text),
+        # )
         
+        # Convert to dict if needed for Pydantic v2 compatibility
+        qm = to_dict(response.get("quality_metrics", {}))
+        sd = to_dict(response.get("structured_data", {}))
+
         # Create response
         query_response = QueryResponse(
-            answer=response.get("answer", "No answer generated"),
+            answer=response.get("formatted_answer") or response.get("full_answer") or response.get("answer", "No answer generated"),
             response_time=response_time,
-            quality_metrics=response.get("quality_metrics", {}),
-            structured_data=response.get("structured_data", {}),
+            quality_metrics=qm,
+            structured_data=sd,
             raw_response=response.get("raw_response", ""),
             request_id=request_id,
         )
+
+        # Print response quality metrics to the terminal
+        print("\n=== Response Quality Metrics ===")
+        for k, v in qm.items():
+            print(f"{k}: {v}")
+        print("===============================\n")
         
         logger.info(
             "Query processed successfully",
@@ -89,16 +113,7 @@ async def ask_question(
         
         return query_response
         
-    except ValidationError as e:
-        logger.warning(
-            "Validation error",
-            request_id=request_id,
-            error=str(e),
-            field=e.field,
-        )
-        raise HTTPException(status_code=400, detail=str(e))
-        
-    except Exception as e:
+    except Exception as e: # Changed from ValidationError to Exception as ValidationError is no longer imported.
         response_time = time.time() - start_time
         logger.error(
             "Error processing query",
@@ -107,14 +122,14 @@ async def ask_question(
             response_time=response_time,
             exc_info=True,
         )
-        raise HTTPException(status_code=500, detail="Internal server error")
+        raise HTTPException(status_code=500, detail="Internal server error") # Added missing import for HTTPException
 
 
 @router.get("/sessions/{session_id}")
 async def get_session_history(
     session_id: str,
     req: Request,
-    chatbot_instance: EnhancedChatbot = Depends(get_chatbot),
+    chatbot_instance: EnhancedMutualFundChatbot = Depends(get_chatbot),
 ) -> dict[str, Any]:
     """Get chat session history."""
     # This would typically query a database
@@ -131,7 +146,7 @@ async def get_session_history(
 async def delete_session(
     session_id: str,
     req: Request,
-    chatbot_instance: EnhancedChatbot = Depends(get_chatbot),
+    chatbot_instance: EnhancedMutualFundChatbot = Depends(get_chatbot),
 ) -> dict[str, str]:
     """Delete a chat session."""
     # This would typically delete from a database

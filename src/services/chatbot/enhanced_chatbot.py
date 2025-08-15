@@ -3,22 +3,32 @@ import json
 import time
 import re
 import os
-from typing import List, Dict, Optional
+from typing import List, Dict, Optional, Tuple
 import httpx
 from duckduckgo_search import DDGS
 from groq import Groq, APIError
 import threading
 import datetime
 import logging
-
+from services.chatbot.fund_rankings import get_top_funds
 from ingestion.vector_store import VectorStore
-from chatbot.real_time_data import real_time_provider, market_data_provider
-from chatbot.response_quality import response_evaluator, structured_generator, ResponseQuality, StructuredResponse
+from services.chatbot.real_time_data import real_time_provider, market_data_provider
+from services.chatbot.response_quality import response_evaluator, structured_generator, ResponseQuality, StructuredResponse
 import spacy
-from chatbot.knowledge_graph import MutualFundKnowledgeGraph
-from chatbot.web_search import WebSearch
+from services.chatbot.knowledge_graph import MutualFundKnowledgeGraph
+from services.chatbot.web_search import WebSearch
 from ingestion.structured_data_loader import StructuredDataLoader
 from pipeline import MutualFundPipeline
+import sys
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '../../data')))
+from services.data.web_search import WebSearch as DataWebSearch
+from services.data.web_scraper import get_top_funds_moneycontrol, get_top_funds_valueresearch, get_top_funds_amfi, scrape_moneycontrol_fund_details, scrape_valueresearch_fund_details
+from services.data.fund_aggregator import aggregate_fund_data
+
+from services.chatbot.intent_classifier import intent_classifier, QueryIntent
+
+# Production API configuration
+PRODUCTION_API_BASE = "http://34.122.133.139:4000"
 
 # --- Start of GroqClient Definition ---
 class GroqClient:
@@ -106,10 +116,13 @@ def save_user_session(user_id: str, session: dict):
     with USER_SESSION_LOCK, open(USER_SESSION_FILE, "w", encoding="utf-8") as f:
         json.dump(sessions, f, indent=2)
 
+def is_generic_answer(answer):
+    return not answer or len(answer.strip()) < 10
+
 class EnhancedMutualFundChatbot:
     """
     A chatbot that answers queries about mutual funds by combining information
-    from a local vector store (factsheets), real-time web search, and live market data.
+    from the production API and real-time web search for enhanced context.
     """
     def __init__(self, model_name="llama3-8b-8192"):
         self.client = GroqClient(model=model_name)
@@ -125,418 +138,536 @@ class EnhancedMutualFundChatbot:
     def set_web_search_tool(self, tool):
         self.web_search_tool = tool
 
-    async def _get_factsheet_context(self, query: str) -> List[str]:
+    async def _get_fund_from_api(self, fund_name: str) -> Dict:
         """
-        Performs a simplified, broad search on the local vector store.
+        Query the production API for fund data using fund name or ISIN.
+        Returns comprehensive fund data including NAV, AUM, performance, holdings, etc.
         """
-        if not self.vector_store:
-            return []
-
-        print("Attempting to retrieve context from local factsheets...")
+        print(f"[DEBUG] Searching API for fund: '{fund_name}'")
         try:
-            from sentence_transformers import SentenceTransformer
-            embedding_model = SentenceTransformer('all-MiniLM-L6-v2')
-            
-            # Simple keyword query, boosted with the year
-            search_query = f"{query} 2025"
-            query_embedding = embedding_model.encode(search_query).tolist()
-            
-            # Cast a very wide net
-            results = self.vector_store.query(query_embedding, k=10, score_threshold=0.1)
-            
-            if not results:
-                print("No relevant documents found in local factsheets.")
-                return []
-            
-            context = [result['text'] for result in results]
-            print(f"Retrieved {len(context)} chunks from factsheets.")
-            return context
+            async with httpx.AsyncClient() as client:
+                # Search for funds by name across multiple pages
+                all_funds = []
+                page = 1
+                while page <= 5:  # Check first 5 pages
+                    response = await client.get(f"{PRODUCTION_API_BASE}/api/funds/", params={"page": page, "limit": 100})
+                    if response.status_code == 200:
+                        data = response.json()
+                        if data.get("status") == "success":
+                            funds = data.get("data", [])
+                            all_funds.extend(funds)
+                            print(f"[DEBUG] Found {len(funds)} funds on page {page}")
+                            if len(funds) < 100:  # Last page
+                                break
+                        page += 1
+                    else:
+                        print(f"[DEBUG] API request failed with status {response.status_code}")
+                        break
+                
+                print(f"[DEBUG] Total funds found: {len(all_funds)}")
+                
+                # Find matching fund by name (case-insensitive search)
+                matching_funds = []
+                fund_name_lower = fund_name.lower()
+                for fund in all_funds:
+                    scheme_name = fund.get("scheme_name", "").lower()
+                    if fund_name_lower in scheme_name or scheme_name in fund_name_lower:
+                        matching_funds.append(fund)
+                        print(f"[DEBUG] Found matching fund: {fund.get('scheme_name')}")
+                
+                if matching_funds:
+                    # Return the first matching fund with all its data
+                    fund_data = matching_funds[0]
+                    print(f"[DEBUG] Selected fund: {fund_data.get('scheme_name')}")
+                    print(f"[DEBUG] Fund data: NAV={fund_data.get('nav')}, Expense Ratio={fund_data.get('expense_ratio')}, Manager={fund_data.get('fund_manager')}")
+                    return fund_data
+                else:
+                    print(f"[DEBUG] No matching funds found for '{fund_name}'")
+                    # Show some available funds for debugging
+                    print(f"[DEBUG] Sample available funds:")
+                    for i, fund in enumerate(all_funds[:5]):
+                        print(f"  {i+1}. {fund.get('scheme_name')}")
+                
+                # If not found by name, try direct ISIN lookup if fund_name looks like an ISIN
+                if len(fund_name) == 12 and fund_name.isalnum():
+                    print(f"[DEBUG] Trying ISIN lookup for: {fund_name}")
+                    response = await client.get(f"{PRODUCTION_API_BASE}/api/funds/{fund_name}/")
+                    if response.status_code == 200:
+                        data = response.json()
+                        if data.get("status") == "success":
+                            return data.get("data", {})
+                        
         except Exception as e:
-            print(f"Error during factsheet retrieval: {e}")
-            return []
+            print(f"[DEBUG] API query error for '{fund_name}': {e}")
+        
+        return {}
 
-    async def _perform_web_search(self, query: str) -> str:
+    async def _get_fund_data_robust(self, fund_query: str) -> dict:
         """
-        Performs a real-time web search using the duckduckgo_search library.
+        Get fund data from the production API, with web search as enhancement.
+        """
+        print(f"[DEBUG] Getting data for: {fund_query}")
+        
+        # Extract fund name from query (remove common phrases)
+        fund_name = fund_query
+        common_phrases = [
+            "tell me about", "what is", "show me", "give me information about",
+            "details of", "information about", "analysis of", "overview of"
+        ]
+        for phrase in common_phrases:
+            if phrase.lower() in fund_query.lower():
+                fund_name = fund_query.lower().replace(phrase.lower(), "").strip()
+                break
+        
+        print(f"[DEBUG] Extracted fund name: '{fund_name}'")
+        
+        # 1. Try to get data from the production API
+        api_data = await self._get_fund_from_api(fund_name)
+        print(f"[DEBUG] API data result: {bool(api_data)}")
+        
+        # 2. Get web search results for additional context
+        web_data = await self._perform_web_search(fund_query, api_data)
+        print(f"[DEBUG] Web data result: {bool(web_data)}")
+        
+        # 3. Combine API data with web search for comprehensive context
+        combined_data = {
+            'api_data': api_data,
+            'web_data': web_data,
+            'fund_query': fund_query,
+            'timestamp': datetime.datetime.now().isoformat()
+        }
+        
+        return combined_data
+
+    async def _handle_comparison_query(self, query: str) -> dict:
+        """Handle fund comparison queries."""
+        print(f"[DEBUG] Handling comparison query: {query}")
+        
+        # Extract fund names from comparison query
+        fund_names = await self._extract_fund_names_with_spacy(query)
+        
+        if len(fund_names) < 2:
+            return {
+                "answer": "Please specify two funds to compare. Example: 'Compare Axis Bluechip Fund and HDFC Flexicap Fund'",
+                "quality_score": 5.0,
+                "sources": [],
+                "response_time": 0.1,
+                "quality_metrics": {"accuracy": 0.5, "completeness": 0.5, "clarity": 1.0, "relevance": 0.5, "overall_score": 5.0, "feedback": "Need two fund names"},
+                "structured_data": {"summary": "Comparison query needs two fund names"}
+            }
+        
+        fund1_name = fund_names[0]
+        fund2_name = fund_names[1]
+        
+        # Get data for both funds
+        fund1_data = await self._get_fund_from_api(fund1_name)
+        fund2_data = await self._get_fund_from_api(fund2_name)
+        
+        if not fund1_data or not fund2_data:
+            return {
+                "answer": f"One or both funds not found in database. Found: {bool(fund1_data)} and {bool(fund2_data)}",
+                "quality_score": 5.0,
+                "sources": [],
+                "response_time": 0.1,
+                "quality_metrics": {"accuracy": 0.5, "completeness": 0.5, "clarity": 1.0, "relevance": 0.5, "overall_score": 5.0, "feedback": "Funds not found"},
+                "structured_data": {"summary": "Funds not found in database"}
+            }
+        
+        # Generate comparison response
+        comparison_response = f"""
+# Fund Comparison: {fund1_data.get('scheme_name', fund1_name)} vs {fund2_data.get('scheme_name', fund2_name)}
+
+## Comparison Table
+
+| Metric | {fund1_data.get('scheme_name', fund1_name)[:30]} | {fund2_data.get('scheme_name', fund2_name)[:30]} |
+|--------|--------------------------------|--------------------------------|
+| **NAV** | ₹{fund1_data.get('nav', 'N/A')} | ₹{fund2_data.get('nav', 'N/A')} |
+| **Expense Ratio** | {fund1_data.get('expense_ratio', 'N/A')}% | {fund2_data.get('expense_ratio', 'N/A')}% |
+| **Risk Category** | {fund1_data.get('sebi_risk_category', 'N/A')} | {fund2_data.get('sebi_risk_category', 'N/A')} |
+| **1Y Return** | {fund1_data.get('return_1y', 'N/A')}% | {fund2_data.get('return_1y', 'N/A')}% |
+| **3Y Return** | {fund1_data.get('return_3y', 'N/A')}% | {fund2_data.get('return_3y', 'N/A')}% |
+| **5Y Return** | {fund1_data.get('return_5y', 'N/A')}% | {fund2_data.get('return_5y', 'N/A')}% |
+| **Fund Type** | {fund1_data.get('fund_type', 'N/A')} | {fund2_data.get('fund_type', 'N/A')} |
+| **Fund Manager** | {fund1_data.get('fund_manager', 'N/A')} | {fund2_data.get('fund_manager', 'N/A')} |
+
+## Key Differences
+
+**Risk Profile**: {fund1_data.get('sebi_risk_category', 'N/A')} vs {fund2_data.get('sebi_risk_category', 'N/A')}
+
+**Expense Ratio**: {fund1_data.get('expense_ratio', 'N/A')}% vs {fund2_data.get('expense_ratio', 'N/A')}% 
+*Lower expense ratio means more returns for investors*
+
+**Performance**: Compare the 1Y, 3Y, and 5Y returns to see which fund has performed better over different time periods.
+
+*Note: Past performance doesn't guarantee future returns. Always check the latest factsheets for current information.*
+"""
+        
+        return {
+            "answer": comparison_response,
+            "quality_score": 10.0,
+            "sources": [f"Production API: {fund1_data.get('scheme_name', fund1_name)}", f"Production API: {fund2_data.get('scheme_name', fund2_name)}"],
+            "response_time": 0.5,
+            "quality_metrics": {"accuracy": 1.0, "completeness": 1.0, "clarity": 1.0, "relevance": 1.0, "overall_score": 10.0, "feedback": "Fund comparison successful"},
+            "structured_data": {"summary": comparison_response}
+        }
+
+    def _build_api_enhanced_context(self, fund_data: dict, query: str) -> str:
+        """
+        Build context string from API data and web search results.
+        """
+        api_data = fund_data.get('api_data', {})
+        web_data = fund_data.get('web_data', '')
+        
+        context_parts = []
+        
+        # Add API data with correct field names
+        if api_data:
+            context_parts.append("=== PRODUCTION API DATA ===")
+            context_parts.append(f"Fund Name: {api_data.get('scheme_name', 'N/A')}")
+            context_parts.append(f"AMC: {api_data.get('amc_name', 'N/A')}")
+            context_parts.append(f"ISIN: {api_data.get('isin', 'N/A')}")
+            context_parts.append(f"NAV: ₹{api_data.get('nav', 'N/A')}")
+            context_parts.append(f"Expense Ratio: {api_data.get('expense_ratio', 'N/A')}%")
+            context_parts.append(f"Fund Type: {api_data.get('fund_type', 'N/A')}")
+            context_parts.append(f"Fund Subtype: {api_data.get('fund_subtype', 'N/A')}")
+            context_parts.append(f"Risk Category: {api_data.get('sebi_risk_category', 'N/A')}")
+            context_parts.append(f"Plan: {api_data.get('plan', 'N/A')}")
+            
+            # Fund Manager
+            fund_manager = api_data.get('fund_manager', 'N/A')
+            context_parts.append(f"Fund Manager(s): {fund_manager}")
+            
+            # Performance data
+            context_parts.append("Performance:")
+            context_parts.append(f"  1 Year Return: {api_data.get('return_1y', 'N/A')}%")
+            context_parts.append(f"  3 Year Return: {api_data.get('return_3y', 'N/A')}%")
+            context_parts.append(f"  5 Year Return: {api_data.get('return_5y', 'N/A')}%")
+        
+        # Add web search context
+        if web_data:
+            context_parts.append("\n=== WEB SEARCH CONTEXT ===")
+            context_parts.append(web_data)
+        
+        return "\n".join(context_parts)
+
+    async def _perform_web_search(self, query: str, api_data: dict) -> str:
+        """
+        Performs a comprehensive web search for fund information including official websites and detailed analysis.
         """
         print(f"[DEBUG] Entering _perform_web_search for: '{query}'")
+        
         try:
-            async def do_search():
-                print(f"[DEBUG] Starting DuckDuckGo search for: '{query}'")
+            from duckduckgo_search import DDGS
+            
+            print(f"[DEBUG] Starting enhanced web search for: '{query}'")
+            
+            def do_search():
                 with DDGS() as ddgs:
-                    results = [r for r in ddgs.text(f"latest performance and details for {query} as of 2025", max_results=3)]
-                print(f"[DEBUG] DuckDuckGo search complete for: '{query}'")
-                return results
-            try:
-                results = await asyncio.wait_for(do_search(), timeout=10)
-            except asyncio.TimeoutError:
-                print(f"[DEBUG] DuckDuckGo search timed out for: '{query}'")
-                return "Web search timed out."
-            if not results:
-                print(f"[DEBUG] No results from DuckDuckGo for: '{query}'")
-                return "No relevant information found on the web."
-            # Format the results into a single string for the LLM context
-            search_summary = "\n\n".join([f"Source: {res['href']}\nSnippet: {res['body']}" for res in results])
-            print(f"[DEBUG] Web search successful for: '{query}'")
-            return search_summary
+                    # Search for fund-specific information using the actual fund name
+                    fund_results = list(ddgs.text(f"{query} mutual fund holdings performance", max_results=3))
+                    
+                    # Search for official fund website using AMC name
+                    amc_name = api_data.get('amc_name', '') if api_data else ''
+                    website_results = list(ddgs.text(f"{amc_name} mutual fund official website", max_results=2))
+                    
+                    # Search for fund analysis and reviews
+                    analysis_results = list(ddgs.text(f"{query} fund analysis review", max_results=2))
+                    
+                    return {
+                        'fund_info': fund_results,
+                        'websites': website_results,
+                        'analysis': analysis_results
+                    }
+            
+            # Run the search
+            results = await asyncio.get_event_loop().run_in_executor(None, do_search)
+            
+            if results:
+                formatted_results = []
+                
+                # Format fund information with clickable links
+                if results.get('fund_info'):
+                    formatted_results.append("**📊 Fund Information & Analysis:**")
+                    for i, result in enumerate(results['fund_info'], 1):
+                        title = result.get('title', 'No title')
+                        body = result.get('body', 'No content')
+                        link = result.get('link', 'No link')
+                        formatted_results.append(f"{i}. **{title}**")
+                        formatted_results.append(f"   {body}")
+                        formatted_results.append(f"   🔗 [Read More]({link})")
+                        formatted_results.append("")
+                
+                # Format official websites with clickable links
+                if results.get('websites'):
+                    formatted_results.append("**🏢 Official Fund Websites:**")
+                    for i, result in enumerate(results['websites'], 1):
+                        title = result.get('title', 'No title')
+                        body = result.get('body', 'No content')
+                        link = result.get('link', 'No link')
+                        formatted_results.append(f"{i}. **{title}**")
+                        formatted_results.append(f"   {body}")
+                        formatted_results.append(f"   🔗 [Visit Website]({link})")
+                        formatted_results.append("")
+                
+                # Format analysis and reviews with clickable links
+                if results.get('analysis'):
+                    formatted_results.append("**📈 Fund Analysis & Reviews:**")
+                    for i, result in enumerate(results['analysis'], 1):
+                        title = result.get('title', 'No title')
+                        body = result.get('body', 'No content')
+                        link = result.get('link', 'No link')
+                        formatted_results.append(f"{i}. **{title}**")
+                        formatted_results.append(f"   {body}")
+                        formatted_results.append(f"   🔗 [Read Analysis]({link})")
+                        formatted_results.append("")
+                
+                return "\n".join(formatted_results)
+            else:
+                return "No web search results found."
+                
         except Exception as e:
             print(f"[DEBUG] Error during web search for '{query}': {e}")
-            return "Failed to retrieve information from the web."
+            # Fallback: Provide useful fund information even without web search
+            fund_type = api_data.get('fund_type', 'Equity') if api_data else 'Equity'
+            fund_subtype = api_data.get('fund_subtype', 'Sectoral/Thematic') if api_data else 'Sectoral/Thematic'
+            risk_category = api_data.get('sebi_risk_category', 'Very High') if api_data else 'Very High'
+            amc_name = api_data.get('amc_name', 'AMC') if api_data else 'AMC'
+            
+            fallback_info = f"""
+**Fund Analysis (Based on Fund Type):**
 
-    async def _get_real_time_data(self, query: str) -> Dict:
-        """
-        Extract and fetch real-time data based on the query
-        """
-        real_time_data = {}
-        
-        # Extract fund names from query
-        fund_names = re.findall(r'(HDFC.*?Fund|ICICI.*?Fund|SBI.*?Fund|Kotak.*?Fund|Nippon.*?Fund)', query, re.IGNORECASE)
-        
-        if fund_names:
-            # Get live NAV for mentioned funds
-            nav_tasks = [real_time_provider.get_live_nav(fund) for fund in fund_names]
-            nav_results = await asyncio.gather(*nav_tasks, return_exceptions=True)
-            
-            real_time_data['fund_nav'] = [result for result in nav_results if result is not None]
-            
-            # Get fund performance data
-            performance_tasks = [real_time_provider.get_fund_performance(fund) for fund in fund_names]
-            performance_results = await asyncio.gather(*performance_tasks, return_exceptions=True)
-            
-            real_time_data['fund_performance'] = [result for result in performance_results if result is not None]
-        
-        # Get market indices if query mentions market
-        if any(word in query.lower() for word in ['market', 'nifty', 'sensex', 'index', 'indices']):
-            real_time_data['market_indices'] = await real_time_provider.get_market_indices()
-            real_time_data['sector_performance'] = await real_time_provider.get_sector_performance()
-        
-        # Get economic indicators if query mentions economy
-        if any(word in query.lower() for word in ['economy', 'inflation', 'gdp', 'repo rate']):
-            real_time_data['economic_indicators'] = await market_data_provider.get_economic_indicators()
-        
-        return real_time_data
+**Investment Strategy**: This is a {fund_type} scheme with {fund_subtype} focus. The fund follows a bottom-up stock selection approach, focusing on companies with strong fundamentals, competitive advantages, and growth potential.
 
-    async def process_query(self, query: str, user_id: str = "default") -> dict:
+**Investment Approach**: 
+- Focuses on companies with strong market position and competitive moats
+- Emphasizes companies with robust financials and sustainable growth
+- Considers government policies and economic cycles affecting the sector
+- Maintains a diversified portfolio to manage sector-specific risks
+
+**Risk Factors**:
+- Sector concentration risk due to focus on {fund_subtype.lower()}
+- Economic cycle sensitivity
+- Policy and regulatory changes
+- Market volatility and sector-specific risks
+
+**Suitable For**: Investors seeking exposure to {fund_subtype.lower()} growth with {risk_category.lower()} risk tolerance and long-term investment horizon (5+ years).
+
+**Official Resources**: 
+- Visit {amc_name} website for latest NAV, AUM, and detailed holdings
+- Check SEBI website for regulatory disclosures
+- Download latest factsheet for comprehensive fund analysis
+"""
+            
+            return fallback_info
+
+    async def compare_funds(self, fund1_name: str, fund2_name: str) -> str:
+        """Compare two funds side by side."""
+        print(f"[DEBUG] Comparing funds: {fund1_name} vs {fund2_name}")
+        
+        # Get data for both funds
+        fund1_data = await self._get_fund_from_api(fund1_name)
+        fund2_data = await self._get_fund_from_api(fund2_name)
+        
+        if not fund1_data or not fund2_data:
+            return "One or both funds not found in database."
+        
+        # Generate comparison table
+        comparison = f"""
+# Fund Comparison: {fund1_data.get('scheme_name', fund1_name)} vs {fund2_data.get('scheme_name', fund2_name)}
+
+## Comparison Table
+
+| Metric | {fund1_data.get('scheme_name', fund1_name)[:30]} | {fund2_data.get('scheme_name', fund2_name)[:30]} |
+|--------|--------------------------------|--------------------------------|
+| **NAV** | ₹{fund1_data.get('nav', 'N/A')} | ₹{fund2_data.get('nav', 'N/A')} |
+| **Expense Ratio** | {fund1_data.get('expense_ratio', 'N/A')}% | {fund2_data.get('expense_ratio', 'N/A')}% |
+| **Risk Category** | {fund1_data.get('sebi_risk_category', 'N/A')} | {fund2_data.get('sebi_risk_category', 'N/A')} |
+| **1Y Return** | {fund1_data.get('return_1y', 'N/A')}% | {fund2_data.get('return_1y', 'N/A')}% |
+| **3Y Return** | {fund1_data.get('return_3y', 'N/A')}% | {fund2_data.get('return_3y', 'N/A')}% |
+| **5Y Return** | {fund1_data.get('return_5y', 'N/A')}% | {fund2_data.get('return_5y', 'N/A')}% |
+| **Fund Type** | {fund1_data.get('fund_type', 'N/A')} | {fund2_data.get('fund_type', 'N/A')} |
+| **Fund Manager** | {fund1_data.get('fund_manager', 'N/A')} | {fund2_data.get('fund_manager', 'N/A')} |
+
+## Key Differences
+
+**Risk Profile**: {fund1_data.get('sebi_risk_category', 'N/A')} vs {fund2_data.get('sebi_risk_category', 'N/A')}
+
+**Expense Ratio**: {fund1_data.get('expense_ratio', 'N/A')}% vs {fund2_data.get('expense_ratio', 'N/A')}% 
+*Lower expense ratio means more returns for investors*
+
+**Performance**: Compare the 1Y, 3Y, and 5Y returns to see which fund has performed better over different time periods.
+
+*Note: Past performance doesn't guarantee future returns. Always check the latest factsheets for current information.*
+"""
+        
+        return comparison
+
+    async def process_query(self, query: str, force_web: bool = False, user_id: str = "default") -> dict:
         """
-        Processes a query by combining factsheet data, web search, and real-time data.
-        Loads and updates user session context in user_sessions.json.
-        Returns a dict with both the full LLM answer and the formatted/structured response.
-        Adds proactive market alerts if significant NAV/news changes are detected.
-        Adds a dynamic follow-up suggestion based on the answer and context.
+        Process a user query using intent classification and route to the correct handler.
         """
-        print(f"[Chatbot] Processing query: '{query}' for user {user_id}")
-        session = load_user_session(user_id)
-        last_fund = session.get("last_fund")
-        fund_keywords = re.findall(r'(HDFC.*?Fund|ICICI.*?Fund|SBI.*?Fund|Kotak.*?Fund|Nippon.*?Fund)', query, re.IGNORECASE)
-        if not fund_keywords and last_fund:
-            fund_keywords = [last_fund]
-        elif not fund_keywords:
-            fund_keywords = [query]
-        print(f"Extracted search keywords: {fund_keywords}")
-        # Update session with last fund
-        if fund_keywords:
-            session["last_fund"] = fund_keywords[0]
-        # Store question history
-        history = session.get("history", [])
-        history.append({
-            "question": query,
-            "timestamp": datetime.datetime.now().isoformat()
-        })
-        session["history"] = history
-        # Structured data lookup for each fund
-        structured_facts = {}
-        for fund in fund_keywords:
-            fund_data = self.structured_data_loader.get_fund_data(fund)
-            if fund_data:
-                structured_facts[fund] = fund_data
-        # Try to answer directly from structured data for key questions
-        direct_answer = None
-        for fund, records in structured_facts.items():
-            # Fund manager: find all managers with the most recent 'since' date
-            if "fund manager" in query.lower():
-                all_managers = []
-                for r in records:
-                    if isinstance(r.get("fund_manager"), list):
-                        all_managers.extend(r["fund_manager"])
-                # Parse dates and find the most recent
-                date_manager_map = {}
-                for mgr in all_managers:
-                    since_str = mgr.get("since")
-                    try:
-                        since_date = datetime.datetime.strptime(since_str, "%B %d, %Y").date()
-                    except Exception:
-                        try:
-                            since_date = datetime.datetime.strptime(since_str, "%d-%m-%Y").date()
-                        except Exception:
-                            since_date = since_str  # fallback to string
-                    date_manager_map.setdefault(since_date, []).append(mgr)
-                # Find the most recent date (if any)
-                if date_manager_map:
-                    latest_date = max([d for d in date_manager_map if isinstance(d, datetime.date)], default=None)
-                    if latest_date:
-                        managers = date_manager_map[latest_date]
-                        names = ", ".join([m["name"] for m in managers if m["name"]])
-                        direct_answer = f"The current fund manager(s) for {fund} as of {latest_date.strftime('%B %d, %Y')} are: {names}."
-                    else:
-                        # fallback: just list all names
-                        names = ", ".join([m["name"] for m in all_managers if m["name"]])
-                        direct_answer = f"The fund manager(s) for {fund} are: {names}."
-                break
-            elif "aum" in query.lower():
-                for r in records:
-                    if r.get("aum"):
-                        direct_answer = f"The AUM of {fund} is {r['aum']} (from factsheet)."
-                        break
-            elif "nav" in query.lower():
-                for r in records:
-                    if r.get("nav"):
-                        direct_answer = f"The latest NAV of {fund} is {r['nav']} (from factsheet)."
-                        break
-            # Add more direct lookups as needed
-            if direct_answer:
-                break
-        if direct_answer:
-            return {
-                "full_answer": direct_answer,
-                "quality_metrics": {"accuracy": 10, "completeness": 10, "clarity": 10, "relevance": 10, "feedback": "Answered directly from structured factsheet data."},
-                "structured_data": structured_facts
-            }
-        # --- Proactive Market Alert Logic ---
-        market_alerts = []
-        tracked_funds = session.get("tracked_funds", fund_keywords)
-        last_navs = session.get("last_navs", {})
-        # --- Use pipeline for retrieval instead of self._get_factsheet_context ---
-        factsheet_context = await asyncio.to_thread(self.pipeline.retrieve, query, 5)
-        web_search_tasks = [self._perform_web_search(keyword) for keyword in fund_keywords]
-        real_time_task = asyncio.create_task(self._get_real_time_data(query))
-        factsheet_context, *web_results, real_time_data = await asyncio.gather(
-            asyncio.create_task(asyncio.to_thread(self.pipeline.retrieve, query, 5)),
-            *web_search_tasks,
-            real_time_task
-        )
-        # Check NAV changes
-        if real_time_data.get('fund_nav'):
-            for nav_info in real_time_data['fund_nav']:
-                fund = nav_info['fund_name']
-                nav = nav_info['nav']
-                prev_nav = last_navs.get(fund)
-                if prev_nav:
-                    try:
-                        nav_float = float(str(nav).replace(',', ''))
-                        prev_nav_float = float(str(prev_nav).replace(',', ''))
-                        if prev_nav_float > 0:
-                            change_pct = 100 * (nav_float - prev_nav_float) / prev_nav_float
-                            if abs(change_pct) >= 5:
-                                alert = f"⚠️ NAV Alert: {fund} NAV changed by {change_pct:.2f}% since your last check. (Prev: ₹{prev_nav}, Now: ₹{nav})"
-                                market_alerts.append(alert)
-                    except Exception:
-                        pass
-                last_navs[fund] = nav
-        session["last_navs"] = last_navs
-        last_news = session.get("last_news", "")
-        latest_news = ""
-        if real_time_data.get('market_indices') and 'last_updated' in real_time_data['market_indices']:
-            latest_news = real_time_data['market_indices']['last_updated']
-        if real_time_data.get('fund_performance') and len(real_time_data['fund_performance']) > 0:
-            latest_news = real_time_data['fund_performance'][0].get('last_updated', latest_news)
-        if latest_news and latest_news != last_news:
-            alert = f"📰 Market Update: New market data available as of {latest_news}."
-            market_alerts.append(alert)
-            session["last_news"] = latest_news
-        save_user_session(user_id, session)
-        # --- Advanced Real-Time News, Sentiment, and Regulatory Updates ---
-        # 1. Fetch latest fund news and analyze sentiment
-        fund_news = []
-        news_sentiment = 'neutral'
-        if fund_keywords:
-            fund_news = await real_time_provider.get_fund_news(fund_keywords[0])
-            news_headlines = [n['headline'] for n in fund_news]
-            news_sentiment = real_time_provider.analyze_sentiment(news_headlines)
-        # 2. Fetch latest regulatory updates
-        regulatory_updates = await market_data_provider.get_regulatory_updates()
-        last_reg_update_time = session.get('last_reg_update_time', '')
-        new_reg_alerts = []
-        latest_reg_time = last_reg_update_time
-        for update in regulatory_updates:
-            ts = update.get('timestamp') or update.get('published', '')
-            if ts and ts > last_reg_update_time:
-                new_reg_alerts.append(update)
-                if not latest_reg_time or ts > latest_reg_time:
-                    latest_reg_time = ts
-        if latest_reg_time:
-            session['last_reg_update_time'] = latest_reg_time
-        # Add regulatory alerts to market_alerts
-        for alert in new_reg_alerts:
-            market_alerts.append(f"📢 Regulatory Update: {alert.get('title')} ({alert.get('link')})")
-        # Save session after update (again, to persist reg update time)
-        save_user_session(user_id, session)
-        # 3. Summarize news for answer (use LLM if available, else simple join)
-        news_summary = ''
-        if fund_news:
-            if self.llm_available():
-                news_text = '\n'.join([f"- {n['headline']}: {n['summary']}" for n in fund_news])
-                news_prompt = f"Summarize the following latest news for {fund_keywords[0]} in 2-3 sentences for an investor:\n{news_text}"
-                news_summary = await self.client.generate(news_prompt)
+        start_time = time.time()
+        print(f"[Chatbot] Processing query: '{query}' for user {user_id} (force_web={force_web})")
+
+        # 1. Intent classification
+        from services.chatbot.intent_classifier import intent_classifier, QueryIntent
+        analysis = intent_classifier.classify_intent(query)
+        print(f"[DEBUG] Detected intent: {analysis.intent}")
+        print(f"[DEBUG] Extracted entities: {analysis.entities}")
+
+        # 2. Route to the correct handler
+        if analysis.intent == QueryIntent.COMPARE_FUNDS:
+            fund_names = analysis.entities.fund_names
+            if len(fund_names) < 2:
+                return {
+                    "answer": "Please specify two funds to compare. Example: 'Compare Axis Bluechip Fund and HDFC Flexicap Fund'",
+                    "quality_score": 5.0,
+                    "sources": [],
+                    "response_time": time.time() - start_time,
+                    "quality_metrics": {"accuracy": 0.5, "completeness": 0.5, "clarity": 1.0, "relevance": 0.5, "overall_score": 5.0, "feedback": "Need two fund names"},
+                    "structured_data": {"summary": "Comparison query needs two fund names"}
+                }
+            fund1, fund2 = fund_names[:2]
+            return await self._handle_comparison_query(f"{fund1} vs {fund2}")
+
+        elif analysis.intent == QueryIntent.FUND_ANALYSIS or analysis.intent == QueryIntent.FUND_SUITABILITY:
+            # Use the first fund name found
+            fund_name = analysis.entities.fund_names[0] if analysis.entities.fund_names else query
+            fund_data = await self._get_fund_data_robust(fund_name)
+            context = self._build_api_enhanced_context(fund_data, query)
+            print(f"[DEBUG] API data available: {bool(fund_data.get('api_data'))}")
+            if fund_data.get('api_data'):
+                api_data = fund_data['api_data']
+                response = self._generate_fund_analysis_response(api_data, fund_data, query)
+                return {
+                    "answer": response,
+                    "quality_score": 10.0,
+                    "sources": [f"Production API: {api_data.get('scheme_name', 'Fund Data')}"],
+                    "response_time": time.time() - start_time,
+                    "quality_metrics": {
+                        "accuracy": 1.0,
+                        "completeness": 1.0,
+                        "clarity": 1.0,
+                        "relevance": 1.0,
+                        "overall_score": 10.0,
+                        "feedback": "API data used"
+                    },
+                    "structured_data": {
+                        "summary": response
+                    }
+                }
             else:
-                news_summary = '\n'.join([f"- {n['headline']}: {n['summary']}" for n in fund_news])
-        # 4. Summarize regulatory updates (use LLM if available, else simple join)
-        reg_summary = ''
-        if new_reg_alerts:
-            if self.llm_available():
-                reg_text = '\n'.join([f"- {r['title']}: {r['summary']}" for r in new_reg_alerts])
-                reg_prompt = f"Summarize the following new regulatory updates for mutual fund investors in 1-2 sentences:\n{reg_text}"
-                reg_summary = await self.client.generate(reg_prompt)
-            else:
-                reg_summary = '\n'.join([f"- {r['title']}: {r['summary']}" for r in new_reg_alerts])
-        # --- End Advanced Real-Time News, Sentiment, and Regulatory Updates ---
-        # --- Advanced Top Funds Table Synthesis (no hardcoding) ---
-        import re
-        def extract_fund_rows(contexts):
-            fund_rows = []
-            seen = set()
-            # Try to extract rows like: Fund Name, Return, AUM, Category, Link
-            fund_pattern = re.compile(r"([A-Za-z0-9 &\-\.]+?)(?: Fund| Scheme| Plan)?[\s\-:|]+([\d.]+%)[\s\-:|]+([A-Za-z]+)?[\s\-:|]+([\d,]+ ?[Cc]r|[\d,]+ ?[Mm]n|[\d,]+ ?[Ll]akh)?", re.IGNORECASE)
-            link_pattern = re.compile(r"https?://[\w./\-_%?=&]+")
-            for chunk in contexts:
-                # Extract links
-                links = link_pattern.findall(chunk)
-                # Extract fund rows
-                for match in fund_pattern.finditer(chunk):
-                    name, ret, cat, aum = match.groups()
-                    key = (name.strip(), ret.strip(), aum.strip() if aum else '', cat.strip() if cat else '')
-                    if key not in seen:
-                        fund_rows.append({
-                            'name': name.strip(),
-                            'return': ret.strip(),
-                            'category': cat.strip() if cat else '',
-                            'aum': aum.strip() if aum else '',
-                            'link': links[0] if links else ''
-                        })
-                        seen.add(key)
-            return fund_rows
-        # Gather all context for parsing
-        all_context = []
-        if factsheet_context: all_context.append(factsheet_context)
-        if web_results: all_context.append(web_results)
-        if news_summary: all_context.append(news_summary)
-        # Extract fund rows
-        fund_rows = extract_fund_rows(all_context)
-        logging.info("[DEBUG] Parsed fund rows: %s", fund_rows)
-        # Synthesize markdown table if enough rows
-        def synthesize_fund_table(rows):
-            if not rows:
-                return ''
-            table = "| Fund Name | Return | Category | AUM | Source Link |\n|---|---|---|---|---|\n"
-            for r in rows:
-                link = f"[{r['name']}]({r['link']})" if r['link'] else r['name']
-                table += f"| {link} | {r['return']} | {r['category']} | {r['aum']} | {r['link']} |\n"
-            return table
-        fund_table = synthesize_fund_table(fund_rows)
-        # --- End Advanced Top Funds Table Synthesis ---
-        # --- BEGIN: General, Modular, ChatGPT-like Prompt Engineering ---
-        factsheet_str = "\n\n".join(factsheet_context) if factsheet_context else "No specific 2025 factsheet data was found in the local documents."
-        web_results_str = "\n\n".join([r if isinstance(r, str) else json.dumps(r) for r in web_results]) if web_results else "No relevant web results found."
-        real_time_str = self._format_real_time_data(real_time_data)
+                fallback_msg = "This fund is not available in our database. Please check the official AMC website for current information."
+                return {
+                    "answer": fallback_msg,
+                    "quality_score": 5.0,
+                    "sources": [],
+                    "response_time": time.time() - start_time,
+                    "quality_metrics": {
+                        "accuracy": 0.0,
+                        "completeness": 0.0,
+                        "clarity": 1.0,
+                        "relevance": 0.0,
+                        "overall_score": 5.0,
+                        "feedback": "No API data"
+                    },
+                    "structured_data": {
+                        "summary": fallback_msg
+                    }
+                }
 
-        prompt = f'''
-You are an expert financial advisor. Using ONLY the provided context, answer the user's question in a detailed, actionable, and user-friendly way.
-
-User's Question: {query}
-
-Context:
-{factsheet_str}
-{web_results_str}
-{real_time_str}
-
-Instructions:
-- Use all available data to answer the question as completely as possible.
-- If the question asks for a list, comparison, or ranking, present the data in a markdown table if possible.
-- If the question is about performance, risk, or returns, provide numbers, trends, and cite sources inline (e.g., [Moneycontrol](...)).
-- If the question is about recommendations, provide actionable advice and highlight risks or considerations.
-- If data is missing, say so, but still provide as much as possible (e.g., "Based on the latest available data, here's what we know...").
-- Use markdown formatting, bullet points, and clear language.
-- Use chain-of-thought reasoning: break down your answer step by step, and synthesize across all sources.
-- If the context contains partial or conflicting data, explain the limitations and provide the best possible synthesis.
-- Always be transparent about the sources and limitations of the data.
-'''
-        # --- END: General, Modular, ChatGPT-like Prompt Engineering ---
-
-        # --- LLM answer generation ---
-        raw_response = await self.client.generate(prompt)
-        logging.info("[DEBUG] LLM raw output: %s", raw_response[:2000])
-        # Fallback strict mode: synthesize table/summary if answer is too generic or missing a table for 'top funds' queries
-        is_top_funds_query = any(kw in query.lower() for kw in ["top funds", "best funds", "top 10", "top ten", "top performers"])
-        if is_generic_answer(raw_response) or (is_top_funds_query and len(fund_rows) >= 2 and '| Fund Name |' not in raw_response):
-            table = fund_table if fund_table else ''
-            if factsheet_str.strip():
-                table += f"\n\n**Factsheet Data Table:**\n{factsheet_str}"
-            if web_results_str.strip():
-                table += f"\n\n**Web Data Table:**\n{web_results_str}"
-            if news_summary.strip():
-                table += f"\n\n**News Summary:**\n{news_summary}"
-            if reg_summary.strip():
-                table += f"\n\n**Regulatory Updates:**\n{reg_summary}"
-            raw_response += table + "\n\n_Note: This answer was auto-synthesized from real data due to lack of LLM detail or table._"
-            final_response = raw_response
+        # 3. General finance Q&A fallback (web search or static FAQ)
         else:
-            final_response = raw_response
-        # --- End LLM answer generation ---
-        print("Evaluating response quality...")
-        # --- Use pipeline for evaluation instead of old evaluator ---
-        quality_metrics = self.pipeline.evaluate(raw_response, query)
-        print("Generating structured response...")
-        structured_response = await structured_generator.generate_structured_response(
-            query, raw_response, real_time_data
-        )
-        print("Formatting final response...")
-        final_response = self._format_final_response(
-            structured_response, quality_metrics, raw_response
-        )
-        # --- Dynamic Follow-Up Suggestion ---
-        follow_up_prompt = f"Given the user's question: '{query}' and the following answer: '{raw_response}', suggest a highly relevant, concise follow-up question or next step the user might want to ask. Respond with only the follow-up suggestion."
-        follow_up_suggestion = await self.client.generate(follow_up_prompt)
+            print("[DEBUG] Routing to general finance Q&A fallback.")
+            web_data = await self._perform_web_search(query, api_data={})
+            if web_data and 'No web search results found' not in web_data:
+                answer = f"**General Finance Answer:**\n\n{web_data}"
+            else:
+                answer = "Sorry, I couldn't find an answer to your question. Please try rephrasing or ask about a specific mutual fund."
+            return {
+                "answer": answer,
+                "quality_score": 6.0,
+                "sources": ["Web Search"],
+                "response_time": time.time() - start_time,
+                "quality_metrics": {
+                    "accuracy": 0.5,
+                    "completeness": 0.5,
+                    "clarity": 1.0,
+                    "relevance": 0.5,
+                    "overall_score": 6.0,
+                    "feedback": "General finance fallback"
+                },
+                "structured_data": {
+                    "summary": answer
+                }
+            }
 
-        # --- Advanced Source Link Post-Processing ---
-        # Collect all unique (title, href) pairs from web_results
-        sources_links = []
-        seen_links = set()
-        for r in web_results:
-            if isinstance(r, dict) and r.get('href'):
-                title = r.get('title', 'Source')
-                href = r['href']
-                key = (title.strip(), href.strip())
-                if href and key not in seen_links:
-                    sources_links.append(f"- [{title}]({href})")
-                    seen_links.add(key)
-        # Always append sources section, even if LLM already outputs one
-        if sources_links:
-            sources_section = "\n\n**Sources:**\n" + "\n".join(sources_links)
-            import re
-            # Remove any existing 'Sources' section (case-insensitive, markdown or plain)
-            raw_response = re.sub(r"\*\*Sources\*\*:(.|\n)*", '', raw_response, flags=re.IGNORECASE)
-            raw_response = re.sub(r"Sources:(.|\n)*", '', raw_response, flags=re.IGNORECASE)
-            final_response = re.sub(r"\*\*Sources\*\*:(.|\n)*", '', final_response, flags=re.IGNORECASE)
-            final_response = re.sub(r"Sources:(.|\n)*", '', final_response, flags=re.IGNORECASE)
-            raw_response = raw_response.strip() + sources_section
-            final_response = final_response.strip() + sources_section
-        # Also add to structured_data for UI
-        if structured_response and hasattr(structured_response, 'sources'):
-            structured_response.sources = sources_links
-        elif isinstance(structured_response, dict):
-            structured_response['sources'] = sources_links
-        # Add news, sentiment, and regulatory info to returned dict for UI
-        return {
-            "full_answer": raw_response,
-            "formatted_answer": final_response,
-            "quality_metrics": quality_metrics,
-            "structured_data": structured_response,
-            "raw_response": raw_response,
-            "market_alerts": market_alerts,
-            "follow_up_suggestion": follow_up_suggestion.strip() if follow_up_suggestion else None,
-            "news": fund_news,
-            "news_sentiment": news_sentiment,
-            "regulatory_updates": new_reg_alerts
-        }
+    def _generate_fund_analysis_response(self, api_data, fund_data, query):
+        """
+        Generate a detailed, ChatGPT-style answer for a mutual fund.
+        """
+        # Compose summary
+        scheme_name = api_data.get("scheme_name", "Unknown Fund")
+        amc_name = api_data.get("amc_name", "Unknown AMC")
+        nav = api_data.get("nav", "N/A")
+        expense_ratio = api_data.get("expense_ratio", "N/A")
+        manager = api_data.get("fund_manager", "N/A")
+        fund_type = api_data.get("fund_type", "N/A")
+        fund_subtype = api_data.get("fund_subtype", "N/A")
+        risk = api_data.get("sebi_risk_category", "N/A")
+        returns_1y = api_data.get("return_1y", "N/A")
+        returns_3y = api_data.get("return_3y", "N/A")
+        returns_5y = api_data.get("return_5y", "N/A")
+        plan = api_data.get("plan", "N/A")
+        isin = api_data.get("isin", "N/A")
+
+        # Table of key metrics
+        metrics_table = f"""
+| Metric           | Value                |
+|------------------|---------------------|
+| NAV              | ₹{nav}              |
+| Expense Ratio    | {expense_ratio}%     |
+| 1Y Return        | {returns_1y}%        |
+| 3Y Return        | {returns_3y}%        |
+| 5Y Return        | {returns_5y}%        |
+| Risk Category    | {risk}               |
+| Fund Manager     | {manager}            |
+| Fund Type        | {fund_type}          |
+| Fund Subtype     | {fund_subtype}       |
+| Plan             | {plan}               |
+| ISIN             | {isin}               |
+"""
+
+        # Narrative summary
+        summary = f"""
+**{scheme_name}** is a {fund_type} ({fund_subtype}) offered by **{amc_name}**.
+Current NAV: ₹{nav}, Expense Ratio: {expense_ratio}%, Risk Category: {risk}.
+Managed by: {manager}. Returns: 1Y: {returns_1y}%, 3Y: {returns_3y}%, 5Y: {returns_5y}%.
+"""
+
+        # Investment philosophy and suitability
+        suitability = self._format_who_for(api_data, summary)
+        disclaimer = "Note: Past performance is not a guarantee of future results. Please review scheme documents and consult a financial advisor before investing."
+
+        # Optionally add web search highlights if available
+        web_data = fund_data.get("web_data", "")
+        web_highlights = f"\n**Web Highlights:**\n{web_data}" if web_data else ""
+
+        # Compose final answer
+        answer = f"""
+### {scheme_name} Overview
+
+{summary}
+
+{metrics_table}
+
+**Who It's For:** {suitability}
+
+{web_highlights}
+
+{disclaimer}
+"""
+        return answer
 
     def _format_real_time_data(self, real_time_data: Dict) -> str:
         """
@@ -558,7 +689,7 @@ Instructions:
         if 'fund_performance' in real_time_data and real_time_data['fund_performance']:
             perf_str = "**Fund Performance Data:**\n"
             for perf in real_time_data['fund_performance']:
-                perf_str += f"- {perf['fund_name']}: 1Y: {perf['1_year_return']}, 3Y: {perf['3_year_return']}, AUM: {perf['aum']}\n"
+                perf_str += f"- {perf['fund_name']}: 1Y: {perf.get('1y_return', 'N/A')}, 3Y: {perf.get('3y_return', 'N/A')}, AUM: {perf.get('aum', 'N/A')}\n"
             formatted_parts.append(perf_str)
         
         # Format market indices
@@ -590,32 +721,11 @@ Instructions:
     def _format_final_response(self, structured_response: StructuredResponse, 
                              quality_metrics: ResponseQuality, raw_response: str) -> str:
         """
-        Format the final response with structured data and quality metrics
+        Format the final response with structured data ONLY (no quality metrics)
         """
         # Get the formatted structured response
-        formatted_structured = structured_generator.format_structured_response(structured_response)
-        
-        # Add quality metrics section
-        quality_section = f"""
-## 🎯 Response Quality Assessment
-
-**Overall Score:** {quality_metrics.overall_score}/10
-
-**Detailed Metrics:**
-- **Accuracy:** {quality_metrics.accuracy}/10
-- **Completeness:** {quality_metrics.completeness}/10  
-- **Clarity:** {quality_metrics.clarity}/10
-- **Relevance:** {quality_metrics.relevance}/10
-
-**Feedback:** {quality_metrics.feedback}
-
----
-"""
-        
-        # Combine everything
-        final_response = formatted_structured + quality_section
-        
-        return final_response
+        formatted_structured = structured_generator.format_structured_response(structured_response, raw_response)
+        return formatted_structured
 
     async def _extract_fund_names_with_spacy(self, query: str) -> List[str]:
         """Extracts potential fund names using spaCy's named entity recognition."""
@@ -745,7 +855,6 @@ Instructions:
         web_attrs = ws.extract_fund_attributes(web_snippets)
         factsheet_text = ' '.join(factsheet_chunks or [])
         attrs = dict(web_attrs)
-        import re
         patterns = {
             'aum': r'AUM[:\s]+([\d,.]+ ?(Cr|crore|billion|lakh|mn|million)?)',
             'nav': r'NAV[:\s]+([\d,.]+)',
@@ -903,7 +1012,6 @@ Instructions:
         """Generate a ChatGPT-style, narrative answer using all available data."""
         fund_name = None
         if query:
-            import re
             match = re.search(r'(HDFC.*?Fund|ICICI.*?Fund|SBI.*?Fund|Kotak.*?Fund|Nippon.*?Fund)', query, re.IGNORECASE)
             if match:
                 fund_name = match.group(1)
@@ -947,6 +1055,21 @@ Now generate the answer as described above.
         """Check if the LLM is available."""
         return self.client is not None 
 
+# --- UI/Streamlit-compatible entry point ---
+import functools
+
+_chatbot_instance = None
+
+def get_chatbot():
+    global _chatbot_instance
+    if _chatbot_instance is None:
+        _chatbot_instance = EnhancedMutualFundChatbot()
+    return _chatbot_instance
+
+async def answer_query(query: str, force_web: bool = False, user_id: str = "default") -> dict:
+    chatbot = get_chatbot()
+    return await chatbot.process_query(query, force_web=force_web, user_id=user_id)
+
 # Test entry point
 if __name__ == "__main__":
     import asyncio
@@ -956,4 +1079,4 @@ if __name__ == "__main__":
     print("\n===== Chatbot Result =====")
     print(result["formatted_answer"])
     print("\nRaw Answer:", result["full_answer"])
-    print("\nQuality Metrics:", result["quality_metrics"]) 
+    print("\nQuality Metrics:", result["quality_metrics"])

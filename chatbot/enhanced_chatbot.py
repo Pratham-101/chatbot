@@ -12,9 +12,9 @@ import logging
 from datetime import datetime
 import pandas as pd
 
-from ingestion.vector_store import VectorStore
-from chatbot.real_time_data import real_time_provider, market_data_provider
-from chatbot.response_quality import response_evaluator, structured_generator, ResponseQuality, StructuredResponse
+from src.ingestion.vector_store import VectorStore
+from src.chatbot.real_time_data import real_time_provider, market_data_provider
+from src.chatbot.response_quality import response_evaluator, structured_generator, ResponseQuality, StructuredResponse
 import spacy
 
 # Add imports for LangChain

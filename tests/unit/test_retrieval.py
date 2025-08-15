@@ -1,7 +1,6 @@
 import unittest
-from chatbot.retrieval import Retriever
-from ingestion.vector_store import VectorStore
-import unittest
+from src.chatbot.retrieval import Retriever
+from src.ingestion.vector_store import VectorStore
 
 class TestRetriever(unittest.TestCase):
     def setUp(self):

@@ -25,3 +25,4 @@ aiohttp
 pandas
 beautifulsoup4
 feedparser
+redis

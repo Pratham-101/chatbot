@@ -24,13 +24,16 @@ class Settings(BaseSettings):
     api_workers: int = Field(default=4, env="API_WORKERS")
     
     # Security
-    secret_key: str = Field(env="SECRET_KEY")
+    secret_key: str = Field(default="your-secret-key-32-characters-long", env="SECRET_KEY")
     access_token_expire_minutes: int = Field(default=30, env="ACCESS_TOKEN_EXPIRE_MINUTES")
     
     # LLM Configuration
     groq_api_key: str = Field(env="GROQ_API_KEY")
     groq_model: str = Field(default="llama3-8b-8192", env="GROQ_MODEL")
     groq_timeout: int = Field(default=30, env="GROQ_TIMEOUT")
+    
+    # OpenAI Configuration (for voice features)
+    openai_api_key: Optional[str] = Field(default=None, env="OPENAI_API_KEY")
     
     # Vector Store
     vector_store_path: str = Field(default="vector_store", env="VECTOR_STORE_PATH")
@@ -67,9 +70,7 @@ class Settings(BaseSettings):
     
     @validator("secret_key", pre=True, always=True)
     def validate_secret_key(cls, v: str) -> str:
-        """Ensure secret key is set and has minimum length."""
-        if not v:
-            raise ValueError("SECRET_KEY must be set")
+        """Ensure secret key has minimum length."""
         if len(v) < 32:
             raise ValueError("SECRET_KEY must be at least 32 characters long")
         return v

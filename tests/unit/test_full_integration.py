@@ -1,6 +1,7 @@
 import pytest
 import requests
 import time
+from src.chatbot.rag_chatbot import RAGChatbot
 
 UI_URL = "http://localhost:30081"
 API_ASK_URL = "http://localhost:30080/ask"

@@ -1,12 +1,14 @@
-import asyncio
-from fastapi import FastAPI, HTTPException
-from pydantic import BaseModel
-from chatbot.enhanced_chatbot import EnhancedMutualFundChatbot
+"""Main FastAPI application."""
+
+from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
+from services.chatbot.enhanced_chatbot import EnhancedMutualFundChatbot
 from ingestion.vector_store import VectorStore
 import os
 import gc
 import traceback
 from dotenv import load_dotenv
+from api.routes import chat, health, voice
 
 # --- GCP Service Account Key for Render ---
 if "GOOGLE_APPLICATION_CREDENTIALS_JSON" in os.environ:
@@ -26,42 +28,28 @@ gc.collect()
 # --- End Memory Optimization ---
 
 # --- App Initialization ---
-app = FastAPI(
-    title="Mutual Fund Chatbot API",
-    description="An API to get insights about mutual funds using RAG, live web search, and real-time data with quality evaluation.",
-    version="2.0.0",
+app = FastAPI(title="Mutual Fund Chatbot API", version="1.0.0")
+
+# Add CORS middleware
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # Configure appropriately for production
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
+
+# Include routers
+app.include_router(chat.router, prefix="/api", tags=["chat"])
+app.include_router(health.router, prefix="/api", tags=["health"])
+app.include_router(voice.router, prefix="/api", tags=["voice"])
+
+@app.get("/")
+async def root():
+    return {"message": "Mutual Fund Chatbot API", "version": "1.0.0"}
 
 # Initialize chatbot with memory-optimized settings
 chatbot = EnhancedMutualFundChatbot(model_name="llama3-8b-8192")
-
-class QueryRequest(BaseModel):
-    text: str
-
-class QualityMetrics(BaseModel):
-    accuracy: float
-    completeness: float
-    clarity: float
-    relevance: float
-    overall_score: float
-    feedback: str
-
-class StructuredData(BaseModel):
-    summary: str
-    key_points: list
-    fund_details: dict
-    performance_data: dict
-    risk_metrics: dict
-    recommendations: list
-    sources: list
-    disclaimer: str
-
-class QueryResponse(BaseModel):
-    answer: str
-    response_time: float
-    quality_metrics: QualityMetrics
-    structured_data: StructuredData
-    raw_response: str
 
 # --- API Endpoints ---
 @app.on_event("startup")
@@ -82,59 +70,5 @@ async def startup_event():
     except Exception as e:
         print(f"Error during startup: {e}")
         # Continue without vector store if it fails
-
-@app.get("/health", summary="Health Check")
-def health_check():
-    """
-    Simple health check endpoint for Kubernetes liveness and readiness probes.
-    """
-    return {"status": "ok", "version": "2.0.0", "features": ["RAG", "Real-time Data", "Quality Evaluation", "Structured Responses"]}
-
-@app.post("/query", response_model=QueryResponse, summary="Ask a question to the chatbot")
-async def ask_question(request: QueryRequest):
-    """
-    Receives a query, processes it with the chatbot, and returns the answer with quality metrics.
-    """
-    try:
-        start_time = asyncio.get_event_loop().time()
-        answer_dict = await chatbot.process_query(request.text)
-        end_time = asyncio.get_event_loop().time()
-        
-        # Force garbage collection after each query to free memory
-        gc.collect()
-        
-        if not answer_dict:
-            raise HTTPException(status_code=500, detail="Failed to generate a response.")
-        
-        # Extract quality metrics and structured data from the response
-        quality_metrics = answer_dict.get("quality_metrics")
-        if hasattr(quality_metrics, "dict"):
-            quality_metrics = quality_metrics.dict()
-        elif hasattr(quality_metrics, "__dict__"):
-            quality_metrics = dict(quality_metrics.__dict__)
-
-        structured_data = answer_dict.get("structured_data")
-        if hasattr(structured_data, "dict"):
-            structured_data = structured_data.dict()
-        elif hasattr(structured_data, "__dict__"):
-            structured_data = dict(structured_data.__dict__)
-
-        # Use the string answer for both answer and raw_response
-        answer_str = answer_dict.get("full_answer", "")
-        
-        return QueryResponse(
-            answer=answer_str,
-            response_time=round(end_time - start_time, 2),
-            quality_metrics=quality_metrics,
-            structured_data=structured_data,
-            raw_response=answer_str  # Use the string answer
-        )
-    except Exception as e:
-        print("[EXCEPTION] An error occurred during query processing:")
-        traceback.print_exc()
-        print(f"[EXCEPTION] Exception type: {type(e)} - {e}")
-        # Force garbage collection on error
-        gc.collect()
-        raise HTTPException(status_code=500, detail=str(e))
 
 load_dotenv()

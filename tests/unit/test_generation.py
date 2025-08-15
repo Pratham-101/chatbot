@@ -1,6 +1,6 @@
 import pytest
 from unittest.mock import AsyncMock, patch
-from chatbot.generation import ResponseGenerator
+from src.chatbot.generation import ResponseGenerator
 
 @pytest.mark.asyncio
 @patch.object(ResponseGenerator, '_call_ollama_async', new_callable=AsyncMock)

@@ -1,6 +1,6 @@
-from chatbot.retrieval import Retriever
-from chatbot.generation import ResponseGenerator
-from ingestion.vector_store import VectorStore
+from src.ingestion.vector_store import VectorStore
+from src.chatbot.retrieval import Retriever
+from src.chatbot.generation import ResponseGenerator
 from evaluation.evaluator import Evaluator
 
 retriever = Retriever(VectorStore())

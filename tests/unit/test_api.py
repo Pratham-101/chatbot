@@ -5,6 +5,7 @@ from api.app import app
 from httpx import AsyncClient
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+from src.chatbot.rag_chatbot import RAGChatbot
 
 @pytest.mark.asyncio
 @patch("chatbot.rag_chatbot.RAGChatbot.generate_answer", new_callable=AsyncMock)

@@ -4,22 +4,22 @@ import time
 from typing import Any
 
 from fastapi import APIRouter, Depends, Request
-from psutil import cpu_percent, memory_percent, disk_usage
+from psutil import cpu_percent, virtual_memory, disk_usage
 
-from ..models.schemas import HealthResponse, MetricsResponse
-from ...core.config import settings
-from ...core.logging import get_logger
-from ...services.chatbot.enhanced_chatbot import EnhancedChatbot
+from api.models.schemas import HealthResponse, MetricsResponse
+from core.config import settings
+from core.logging import get_logger
+from services.chatbot.enhanced_chatbot import EnhancedMutualFundChatbot
 
 router = APIRouter()
 logger = get_logger("api.health")
 
 
-async def get_chatbot() -> EnhancedChatbot | None:
+async def get_chatbot() -> EnhancedMutualFundChatbot | None:
     """Get chatbot instance for health checks."""
     try:
-        from ...services.chatbot.enhanced_chatbot import EnhancedChatbot
-        return EnhancedChatbot()
+        from services.chatbot.enhanced_chatbot import EnhancedMutualFundChatbot
+        return EnhancedMutualFundChatbot()
     except Exception:
         return None
 
@@ -37,7 +37,7 @@ async def health_check(req: Request) -> HealthResponse:
     # Check system resources
     try:
         cpu_usage = cpu_percent(interval=0.1)
-        memory_usage = memory_percent()
+        memory_usage = virtual_memory().percent
         disk_usage_info = disk_usage("/")
         
         services_status.update({

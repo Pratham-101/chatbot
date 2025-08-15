@@ -5,7 +5,7 @@ import os
 # Add the current directory to Python path
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
-from chatbot.rag_chatbot import RAGChatbot
+from src.chatbot.rag_chatbot import RAGChatbot
 
 async def test_chatbot():
     print("Testing Mutual Fund Chatbot...")

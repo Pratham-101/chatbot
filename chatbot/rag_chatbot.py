@@ -1,8 +1,9 @@
 import asyncio
 from typing import List
-from chatbot.retrieval import Retriever
-from ingestion.vector_store import VectorStore
-from chatbot.generation import ResponseGenerator
+from src.ingestion.vector_store import VectorStore
+from src.chatbot.retrieval import Retriever
+from src.chatbot.generation import ResponseGenerator
+from chatbot.api_fetcher import fetch_fund_details_from_api
 import time
 import json
 import os
@@ -155,6 +156,69 @@ class RAGChatbot:
                     json.dump(data, f, indent=2)
         except Exception as e:
             print(f"Error logging conversation: {e}")
+
+    async def _generate_vector_answer(self, query: str, k: int):
+        # Otherwise proceed with normal retrieval and generation
+        context_chunks = self.retriever.get_relevant_context(query, k=k)
+        print(f"[RAG] Retrieved {len(context_chunks)} context chunks for query: {query}")
+
+        # Limit context chunks to top 3 for generation
+        limited_context_chunks = context_chunks[:3]
+        print(f"[RAG] Limited context chunks to top 3")
+
+        # Retrieve web data using the response generator's web call method
+        web_data = ""
+        try:
+            web_data = await asyncio.wait_for(self.response_generator._call_ollama_web(query), timeout=15.0)
+            print(f"[RAG] Retrieved web data for query: {query}")
+        except asyncio.TimeoutError:
+            print("[RAG] Timeout retrieving web data")
+        except Exception as e:
+            print(f"[RAG] Failed to retrieve web data: {e}")
+
+        if not limited_context_chunks and not web_data:
+            print("[RAG] No context chunks or web data found, returning fallback message")
+            return "I couldn't find specific information about this in our factsheets. Would you like me to:\n1. Try a broader search\n2. Search the web for more details\n3. Help you find similar funds?"
+
+        # Include conversation history in prompt construction (simple concatenation)
+        conversation_context = "\n".join(
+            [f"{turn['role'].capitalize()}: {turn['content']}" for turn in self.conversation_history[-6:]]
+        )
+        print(f"[RAG] Constructed conversation context")
+
+        # Generate answer with conversation context and enriched query
+        # Pass conversation context explicitly to generation prompt
+        try:
+            answer = await asyncio.wait_for(
+                self.response_generator.generate_response(
+                    query, limited_context_chunks, web_data=web_data, conversation_context=conversation_context
+                ),
+                timeout=30.0
+            )
+            print(f"[RAG] Generated answer")
+        except asyncio.TimeoutError:
+            print("[RAG] Timeout generating answer")
+            answer = "I'm having trouble generating a complete response right now. You can:\n1. Try rephrasing your question\n2. Ask for specific fund details\n3. Request a simpler summary"
+        except Exception as e:
+            print(f"[RAG] Exception generating answer: {e}")
+            answer = "Sorry, an error occurred while generating the answer. Please try again."
+
+        return answer
+
+    async def _fetch_api_data(self, fund_name: str):
+        # Placeholder for API fetching logic
+        # For now, just return an empty dict
+        return {}
+
+    def _extract_fund_name(self, query: str) -> str:
+        # Implement a simple extraction or use regex/NLP as needed
+        # For now, just a placeholder
+        # Example: extract words after "of" in "What is the NAV of HDFC Top 100 Fund?"
+        import re
+        match = re.search(r'of ([\w\s]+?)(?:\?|$)', query, re.IGNORECASE)
+        if match:
+            return match.group(1).strip()
+        return ""
 
 # Example usage for testing
 if __name__ == "__main__":

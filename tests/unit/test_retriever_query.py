@@ -1,5 +1,5 @@
-from chatbot.retrieval import Retriever
-from ingestion.vector_store import VectorStore
+from src.chatbot.retrieval import Retriever
+from src.ingestion.vector_store import VectorStore
 
 def test_get_relevant_context():
     vector_store = VectorStore()

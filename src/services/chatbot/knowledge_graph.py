@@ -2,6 +2,15 @@ import os
 import json
 from typing import Dict, Any, Optional
 
+def load_factsheet(path):
+    with open(path) as f:
+        data = json.load(f)
+        if isinstance(data, dict):
+            data = [data]
+        if not isinstance(data, list):
+            return []
+        return [item for item in data if isinstance(item, dict)]
+
 class MutualFundKnowledgeGraph:
     """
     Lightweight in-memory knowledge graph for mutual fund attributes.
@@ -20,12 +29,11 @@ class MutualFundKnowledgeGraph:
             if filename.endswith(".json"):
                 file_path = os.path.join(self.structured_data_dir, filename)
                 try:
-                    with open(file_path, "r", encoding="utf-8") as f:
-                        records = json.load(f)
-                        for record in records:
-                            fund_name = record.get("fund_name")
-                            if fund_name:
-                                self.graph[fund_name.lower()] = record
+                    records = load_factsheet(file_path)
+                    for record in records:
+                        fund_name = record.get("fund_name")
+                        if fund_name:
+                            self.graph[fund_name.lower()] = record
                 except Exception as e:
                     print(f"Knowledge graph: error loading {file_path}: {e}")
 

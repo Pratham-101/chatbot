@@ -279,6 +279,31 @@ class MutualFundDB:
             """
             return self.execute_query(query, (limit,))
     
+    def get_top_funds_advanced(self, category: str = None, limit: int = 10, sort_by: str = None, period: str = None) -> List[Dict]:
+        """Get top funds dynamically by category, period, and metric."""
+        # Determine sort column
+        sort_col = 'sharpe_ratio' if sort_by == 'risk' else 'aum' if sort_by == 'aum' else None
+        if period and (sort_by == 'returns' or not sort_by):
+            sort_col = f'return_{period}'
+        elif not sort_col:
+            sort_col = 'return_1y'
+        # Build query
+        base = "SELECT f.scheme_name, f.amc, f.sub_category, f.scheme_type, n.nav as nav_value, r.return_1y, r.return_3y, r.return_5y, a.sharpe_ratio, a.volatility, a.beta, a.alpha, a.max_drawdown, f.aum "
+        base += "FROM mf_factsheet f "
+        base += "LEFT JOIN mf_nav_history n ON f.isin = n.isin "
+        base += "LEFT JOIN mf_returns r ON f.isin = r.isin "
+        base += "LEFT JOIN mf_fund_analytics a ON f.isin = a.isin "
+        where = []
+        params = []
+        if category:
+            where.append("LOWER(f.sub_category) LIKE %s")
+            params.append(f'%{category.lower()}%')
+        if where:
+            base += "WHERE " + " AND ".join(where) + " "
+        base += f"ORDER BY {sort_col} DESC NULLS LAST LIMIT %s;"
+        params.append(limit)
+        return self.execute_query(base, tuple(params))
+    
     def get_categories(self) -> List[str]:
         """Get all fund categories"""
         query = """

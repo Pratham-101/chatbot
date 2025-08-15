@@ -1,8 +1,8 @@
 import asyncio
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
-from chatbot.enhanced_chatbot import EnhancedMutualFundChatbot
-from ingestion.vector_store import VectorStore
+from src.services.chatbot.enhanced_chatbot import EnhancedMutualFundChatbot
+from src.ingestion.vector_store import VectorStore
 import os
 import gc
 import traceback

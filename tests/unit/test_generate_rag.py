@@ -1,7 +1,7 @@
 import pytest
 import asyncio
 from unittest.mock import patch, AsyncMock
-from chatbot.rag_chatbot import RAGChatbot
+from src.chatbot.rag_chatbot import RAGChatbot
 
 @pytest.mark.asyncio
 @patch("chatbot.rag_chatbot.RAGChatbot.generate_answer", new_callable=AsyncMock)

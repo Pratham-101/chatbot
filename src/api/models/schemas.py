@@ -12,6 +12,7 @@ class QueryRequest(BaseModel):
     text: str = Field(..., min_length=1, max_length=1000, description="User query text")
     user_id: Optional[str] = Field(None, description="Optional user identifier")
     session_id: Optional[str] = Field(None, description="Optional session identifier")
+    force_web: Optional[bool] = Field(False, description="Force real-time web search for latest data")
     
     @validator("text")
     def validate_text(cls, v: str) -> str:

@@ -1,5 +1,5 @@
 from chatbot.retrieval import Retriever
-from ingestion.vector_store import VectorStore
+from src.ingestion.vector_store import VectorStore
 
 def test_get_fund_manager(query: str):
     vector_store = VectorStore()

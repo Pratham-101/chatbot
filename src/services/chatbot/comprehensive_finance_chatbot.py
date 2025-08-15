@@ -20,7 +20,7 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(
 
 # Database and Vector Store
 from src.services.data.db_access import get_db_instance, MutualFundDB
-from ingestion.vector_store import VectorStore
+from src.ingestion.vector_store import VectorStore
 
 # Web Search and Scraping
 from duckduckgo_search import DDGS
@@ -33,6 +33,9 @@ from selenium.webdriver.chrome.options import Options
 # LLM
 from groq import Groq
 import os
+
+# New web scraper module
+from src.services.data.web_scraper import get_top_funds_amfi, get_top_funds_moneycontrol, get_top_funds_valueresearch
 
 logger = logging.getLogger(__name__)
 
@@ -405,80 +408,138 @@ Provide a detailed, well-structured answer with specific data points and insight
             logger.error(f"LLM error: {e}")
             return context
     
-    async def answer_query(self, query: str) -> str:
-        """Main method to answer any finance-related query"""
+    def extract_criteria(self, query: str) -> dict:
+        """Extracts N, criteria, period, and category from the query."""
+        criteria = {
+            'top_n': 5,
+            'category': None,
+            'period': None,
+            'sort_by': None,
+        }
+        # Extract N (top 5, top 10, etc.)
+        match = re.search(r'(top|best|highest|lowest)\s*(\d+)', query, re.IGNORECASE)
+        if match:
+            criteria['top_n'] = int(match.group(2))
+        # Extract period (1y, 3y, 5y, etc.)
+        period_match = re.search(r'(\d+)\s*[- ]?year|1y|3y|5y|10y', query, re.IGNORECASE)
+        if period_match:
+            period = period_match.group(0)
+            if '1' in period:
+                criteria['period'] = '1y'
+            elif '3' in period:
+                criteria['period'] = '3y'
+            elif '5' in period:
+                criteria['period'] = '5y'
+            elif '10' in period:
+                criteria['period'] = '10y'
+        # Extract category (equity, debt, elss, large cap, etc.)
+        categories = ['equity', 'debt', 'elss', 'hybrid', 'large cap', 'mid cap', 'small cap', 'index', 'tax', 'liquid', 'short term', 'long term']
+        for cat in categories:
+            if cat in query.lower():
+                criteria['category'] = cat
+        # Extract sort_by (returns, risk, sharpe, etc.)
+        if re.search(r'(return|performance|cagr)', query, re.IGNORECASE):
+            criteria['sort_by'] = 'returns'
+        elif re.search(r'(sharpe|alpha|beta|volatility|risk)', query, re.IGNORECASE):
+            criteria['sort_by'] = 'risk'
+        elif re.search(r'(aum|size)', query, re.IGNORECASE):
+            criteria['sort_by'] = 'aum'
+        return criteria
+
+    async def get_top_funds_dynamic(self, query: str) -> List[Dict]:
+        """Dynamically fetch top funds based on extracted criteria."""
+        criteria = self.extract_criteria(query)
+        return self.db.get_top_funds_advanced(
+            category=criteria['category'],
+            limit=criteria['top_n'],
+            sort_by=criteria['sort_by'],
+            period=criteria['period']
+        )
+
+    def format_top_funds_response(self, funds: List[Dict], criteria: dict) -> str:
+        if not funds:
+            return "No funds found for your criteria."
+        response = [f"Top {criteria['top_n']} mutual funds"]
+        if criteria['category']:
+            response[0] += f" in {criteria['category'].title()} category"
+        if criteria['period']:
+            response[0] += f" (by {criteria['period']} returns)"
+        response[0] += ":\n"
+        for i, fund in enumerate(funds, 1):
+            nav = fund.get('nav_value') or fund.get('nav')
+            returns = fund.get(f'return_{criteria["period"]}') if criteria['period'] else fund.get('return_1y')
+            response.append(f"{i}. {fund['scheme_name']} | NAV: ₹{nav} | Returns: {returns}% | AMC: {fund.get('amc') or fund.get('amc_name')}")
+        response.append("\n*Source: PostgreSQL Database*")
+        return '\n'.join(response)
+
+    async def get_top_funds_realtime(self, query: str, limit: int = 5) -> List[Dict]:
+        """Try to get top funds from web sources, fallback to DB if needed."""
+        # Try Moneycontrol first
         try:
-            # Check if this is a response to a clarification prompt
-            if hasattr(self, 'last_fuzzy_matches') and self.last_fuzzy_matches:
-                fund_names, error_msg = self.process_clarification_response(query)
-                if error_msg:
-                    return error_msg
-                if not fund_names:
-                    return "Please provide a valid selection or fund name."
-                
-                # Use the original query context but with the clarified fund names
-                original_query = getattr(self, 'ambiguous_query', query)
-                intent = self.detect_intent(original_query)
-            else:
-                # Step 1: Detect intent and extract fund names
-                intent = self.detect_intent(query)
-                fund_names = self.extract_fund_names(query)
-                
-                logger.info(f"Intent: {intent}, Fund names: {fund_names}")
-                
-                # Check if we have ambiguous fuzzy matches that need clarification
-                if not fund_names and hasattr(self, 'last_fuzzy_matches') and self.last_fuzzy_matches:
-                    clarification_prompt = self.generate_clarification_prompt()
-                    if clarification_prompt:
-                        return clarification_prompt
-            
-            # Use the appropriate query context
-            query_context = getattr(self, 'ambiguous_query', query)
-            
-            # Step 2: Gather data from all sources
-            db_data = await self.get_database_data(fund_names, query_context)
-            vector_data = await self.get_vector_store_data(query_context)
-            web_data = await self.get_web_search_data(query_context)
-            selenium_data = await self.get_selenium_data(fund_names)
-            
-            # Step 3: Format responses from each source
-            responses = []
-            
-            if db_data:
-                db_response = self.format_database_response(db_data, query_context)
-                if db_response:
-                    responses.append(db_response)
-            
-            if vector_data:
-                responses.append(f"**Factsheet Information:**\n{vector_data}")
-            
-            if web_data:
-                web_response = self.format_web_search_response(web_data)
-                if web_response:
-                    responses.append(web_response)
-            
-            if selenium_data:
-                selenium_response = self.format_selenium_response(selenium_data)
-                if selenium_response:
-                    responses.append(selenium_response)
-            
-            # Step 4: Combine all responses
-            if responses:
-                combined_response = "\n\n".join(responses)
-                
-                # Step 5: Use LLM to synthesize if available
-                if self.llm:
-                    final_response = await self.generate_llm_response(query_context, combined_response)
-                else:
-                    final_response = combined_response
-                
-                return final_response
-            else:
-                return "I couldn't find specific information about that. Please try rephrasing your question or check official sources."
-        
+            funds = get_top_funds_moneycontrol(limit)
+            if funds and len(funds) >= limit:
+                for f in funds:
+                    f['source'] = 'Moneycontrol'
+                return funds
         except Exception as e:
-            logger.error(f"Error in answer_query: {e}")
-            return f"I encountered an error while processing your request. Please try again or rephrase your question."
+            logger.warning(f"Moneycontrol scrape failed: {e}")
+        # Try Value Research
+        try:
+            funds = get_top_funds_valueresearch(limit)
+            if funds and len(funds) >= limit:
+                for f in funds:
+                    f['source'] = 'Value Research'
+                return funds
+        except Exception as e:
+            logger.warning(f"Value Research scrape failed: {e}")
+        # Try AMFI
+        try:
+            funds = get_top_funds_amfi(limit)
+            if funds and len(funds) >= limit:
+                for f in funds:
+                    f['source'] = 'AMFI'
+                return funds
+        except Exception as e:
+            logger.warning(f"AMFI scrape failed: {e}")
+        # Fallback to DB
+        logger.warning("All web scrapes failed, falling back to DB.")
+        return await asyncio.get_event_loop().run_in_executor(None, self.get_top_funds_dynamic, query)
+
+    def format_top_funds_realtime(self, funds: List[Dict], criteria: dict) -> str:
+        if not funds:
+            return "No funds found for your criteria."
+        response = [f"Top {criteria['top_n']} mutual funds"]
+        if criteria['category']:
+            response[0] += f" in {criteria['category'].title()} category"
+        if criteria['period']:
+            response[0] += f" (by {criteria['period']} returns)"
+        response[0] += ":\n"
+        for i, fund in enumerate(funds, 1):
+            nav = fund.get('nav') or fund.get('nav_value')
+            returns = fund.get(f'return_{criteria["period"]}') if criteria.get('period') else fund.get('1y_return') or fund.get('return_1y')
+            aum = fund.get('aum') or fund.get('aum (cr)')
+            date = fund.get('date')
+            src = fund.get('source')
+            response.append(f"{i}. {fund.get('scheme_name')} | NAV: ₹{nav} | Returns: {returns}% | AUM: {aum} | Source: {src} | As of: {date}")
+        response.append("\n*Data is fetched in real-time from the web. If you need the absolute latest, click 'Force Web Search'.*")
+        return '\n'.join(response)
+
+    async def answer_query(self, query: str, force_web: bool = False) -> str:
+        try:
+            criteria = self.extract_criteria(query)
+            if any(word in query.lower() for word in ['top', 'best', 'highest', 'lowest']) or force_web:
+                funds = await self.get_top_funds_realtime(query, limit=criteria['top_n'])
+                if funds:
+                    answer = self.format_top_funds_realtime(funds, criteria)
+                    # Use LLM to synthesize and explain
+                    if self.llm:
+                        answer = await self.generate_llm_response(query, answer)
+                    return answer
+            # ... fallback to original logic ...
+            return await super().answer_query(query)
+        except Exception as e:
+            logger.error(f"Error in advanced answer_query: {e}")
+            return "I encountered an error while processing your request. Please try again or rephrase your question."
 
 # Global instance
 comprehensive_chatbot = None

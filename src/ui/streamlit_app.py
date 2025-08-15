@@ -1,69 +1,89 @@
-import os
-from dotenv import load_dotenv
-load_dotenv()
 import streamlit as st
 import requests
 import json
-from chatbot.enhanced_chatbot import answer_query
-import base64
-import re
+import queue
+import threading
+import numpy as np
+
+# Defer optional imports so the app still works without voice deps
+try:
+    import streamlit_webrtc  # type: ignore
+    _has_webrtc = True
+except Exception:
+    _has_webrtc = False
+
+try:
+    import speech_recognition as sr  # type: ignore
+    _has_sr = True
+except Exception:
+    _has_sr = False
 
 st.set_page_config(page_title="Mutual Fund Chatbot Review", layout="centered")
 st.title("🤖 Mutual Fund Chatbot Review UI")
 
-API_URL = "http://localhost:8000/query"
+API_URL = "http://localhost:8000/api/query"
 
 st.markdown("Enter your mutual fund question below:")
-query = st.text_input("Your question", "Tell me about HDFC Defence Fund?")
 
-if query:
-    with st.spinner("Fetching answer..."):
-        answer = answer_query(query)
-    # Split out base64 images and display them
-    text = re.sub(r'!\[.*?\]\(data:image/png;base64,[^\)]+\)', '', answer)
-    st.markdown(text)
-    img_matches = re.findall(r'!\[.*?\]\(data:image/png;base64,([^\)]+)\)', answer)
-    for img_b64 in img_matches:
-        st.image(base64.b64decode(img_b64), use_column_width=True)
-    # Optionally, allow download of last chart
-    if img_matches:
-        st.download_button("Download Chart", base64.b64decode(img_matches[-1]), file_name="chart.png", mime="image/png")
+input_options = ["Text"] + (["Voice"] if (_has_webrtc and _has_sr) else [])
+input_method = st.radio("Choose input method:", input_options)
 
-if st.button("Ask"):    
-    with st.spinner("Getting answer..."):
-        try:
-            resp = requests.post(API_URL, json={"text": query}, timeout=60)
-            if resp.status_code == 200:
-                data = resp.json()
-                answer = data.get("answer", "No answer.")
-                structured = data.get("structured_data", {})
-                quality = data.get("quality_metrics", {})
-                # --- Display sections ---
-                st.subheader("Chatbot Answer")
-                st.markdown(answer)
+if input_method == "Text":
+    user_query = st.text_input("Your question:")
+    if st.button("Ask") and user_query:
+        with st.spinner("Processing..."):
+            try:
+                response = requests.post(API_URL, json={"text": user_query})
+                if response.status_code == 200:
+                    st.success(response.json().get("answer", "No answer returned."))
+                else:
+                    st.error(f"Request failed: {response.text}")
+            except Exception as e:
+                st.error(f"Request failed: {e}")
 
-                # Show summary only if it is non-empty and not a placeholder
-                summary = structured.get("summary", "").strip()
-                if summary and summary != "-" and len(summary) > 10:
-                    st.subheader("Summary")
-                    st.write(summary)
-
-                # Show sources if present and non-empty
-                sources = structured.get("sources")
-                if sources and isinstance(sources, list) and any(sources):
-                    st.subheader("Sources")
-                    st.markdown("\n".join([f"- {src}" for src in sources if src and src != "-"]))
-
-                # Show disclaimer if present and non-empty
-                disclaimer = structured.get("disclaimer", "").strip()
-                if disclaimer and disclaimer != "-":
-                    st.subheader("Disclaimer")
-                    st.info(disclaimer)
-
-                # --- Hide all other sections unless they have real, non-placeholder data ---
-                # (No key points, fund details, performance data, risk metrics, recommendations, response quality, or raw JSON)
-
-            else:
-                st.error(f"API error: {resp.status_code}\n{resp.text}")
-        except Exception as e:
-            st.error(f"Request failed: {e}") 
+if input_method == "Voice":
+    # Import only when needed to avoid top-level failures
+    try:
+        from streamlit_webrtc import webrtc_streamer, AudioProcessorBase  # type: ignore
+        import speech_recognition as sr  # type: ignore
+    except Exception as e:
+        st.warning(
+            "Voice mode is unavailable (missing dependencies). "
+            "Install 'streamlit-webrtc' and 'SpeechRecognition' to enable it.\n\n"
+            f"Details: {e}"
+        )
+        st.stop()
+    st.subheader("🎤 Voice to Text (Speak your question)")
+    result_text = st.empty()
+    class AudioProcessor(AudioProcessorBase):
+        def __init__(self):
+            self.q = queue.Queue()
+            self.recognizer = sr.Recognizer()
+            self.audio_data = b""
+        def recv(self, frame):
+            audio = frame.to_ndarray()
+            self.audio_data += audio.tobytes()
+            return frame
+        def get_text(self):
+            try:
+                audio = sr.AudioData(self.audio_data, 16000, 2)
+                text = self.recognizer.recognize_google(audio)
+                return text
+            except Exception as e:
+                return f"[Error] {e}"
+    ctx = webrtc_streamer(key="voice-to-text", audio_receiver_size=1024, audio_processor_factory=AudioProcessor, media_stream_constraints={"audio": True, "video": False})
+    if ctx and ctx.state.playing:
+        st.info("Recording... Speak now!")
+        if st.button("Stop and Transcribe"):
+            text = ctx.audio_processor.get_text()
+            result_text.text_area("Recognized Text", value=text, height=100)
+            if st.button("Ask with this text"):
+                with st.spinner("Processing..."):
+                    try:
+                        response = requests.post(API_URL, json={"text": text})
+                        if response.status_code == 200:
+                            st.success(response.json().get("answer", "No answer returned."))
+                        else:
+                            st.error(f"Request failed: {response.text}")
+                    except Exception as e:
+                        st.error(f"Request failed: {e}") 

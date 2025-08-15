@@ -3,8 +3,8 @@ import os
 import asyncio
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
-from ingestion.vector_store import VectorStore
-from chatbot.enhanced_chatbot import EnhancedMutualFundChatbot
+from src.ingestion.vector_store import VectorStore
+from src.chatbot.enhanced_chatbot import EnhancedMutualFundChatbot
 
 async def debug_final_prompt():
     print("--- Debugging Final Prompt ---")

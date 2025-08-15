@@ -1,5 +1,6 @@
 import pytest
 from playwright.sync_api import sync_playwright
+from src.chatbot.rag_chatbot import RAGChatbot
 
 @pytest.fixture(scope="session")
 def playwright_context():

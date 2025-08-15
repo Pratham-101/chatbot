@@ -1,7 +1,7 @@
 import unittest
 import asyncio
 from unittest.mock import patch, AsyncMock
-from chatbot.rag_chatbot import RAGChatbot
+from src.chatbot.rag_chatbot import RAGChatbot
 
 class TestRAGChatbotIntegration(unittest.TestCase):
     def setUp(self):

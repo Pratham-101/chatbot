@@ -1,0 +1,33 @@
+# Voice Assistant Requirements
+
+# Core audio processing
+numpy>=1.21.0
+scipy>=1.7.0
+
+# Speech-to-Text (STT)
+openai-whisper>=20231117
+SpeechRecognition>=3.10.0
+
+# Text-to-Speech (TTS)
+pyttsx3>=2.90
+elevenlabs>=0.2.24
+
+# Audio processing
+pydub>=0.25.1
+librosa>=0.10.0
+
+# Web scraping (for fund rankings)
+requests>=2.28.0
+beautifulsoup4>=4.11.0
+lxml>=4.9.0
+
+# Caching
+redis>=4.5.0
+
+# Utilities
+python-dotenv>=0.19.0
+dataclasses-json>=0.5.7
+
+# Optional: For better audio quality
+soundfile>=0.12.1
+webrtcvad>=2.0.10 
